@@ -1,0 +1,6 @@
+# Keep LF everywhere (shell scripts, Dockerfile and the Vite build break with CRLF), even with core.autocrlf=true.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary
+*.epub binary

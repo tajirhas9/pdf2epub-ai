@@ -1,0 +1,17 @@
+{
+  "pdf": "sample/sample.pdf",
+  "class": "scanned book, poor hidden OCR layer, mixed English/Arabic, spreads, side tab",
+  "langs": ["en", "ar"],
+  "expect_text": [
+    "the biography of Prophet Muhammad",
+    "represents a complete picture of the magnificent Divine Message",
+    "Clay rock near Riyadh",
+    "It is known that Ibrahim left Ar for Harran and then for Palestine",
+    "The Arabian Peninsula is enclosed in the west by the Red Sea and Sinai",
+    "Thanks to its geographical position, the peninsula has always had great strategic importance",
+    "There were four divisions of the tribe of"
+  ],
+  "forbid_text": ["The Seald Nectar", "Location and Nature of Arab Tribes"],
+  "spreads": [[34, 35], [36, 37]],
+  "expect_rtl_blocks": 3
+}

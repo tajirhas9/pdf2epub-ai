@@ -1,0 +1,38 @@
+{
+  "name": "pdf2epub-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build:epub": "vite build --mode epub",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "build:pages": "vite build --mode pages",
+    "build:ui": "vite build --config vite.ui.config.ts",
+    "dev:ui": "vite --config vite.ui.config.ts --open /ui.html"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@vueuse/core": "15.0.0",
+    "pinia": "4.1.0",
+    "vue": "3.5.44",
+    "vue-router": "5.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "@vitejs/plugin-vue": "6.0.10",
+    "@vue/test-utils": "2.5.1",
+    "happy-dom": "21.0.1",
+    "json-schema-to-typescript": "16.0.0",
+    "jszip": "3.10.2",
+    "lightningcss": "1.33.0",
+    "parse5": "8.0.1",
+    "typescript": "5.9.3",
+    "vite": "8.3.4",
+    "vitest": "5.0.4",
+    "vue-tsc": "3.3.13"
+  }
+}

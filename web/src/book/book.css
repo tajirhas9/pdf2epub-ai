@@ -1,0 +1,102 @@
+/* Shared by the dev viewer and the EPUB. Keep to features e-readers support;
+   Lightning CSS downlevels modern syntax at build time. */
+
+body {
+  margin: 0 4%;
+  font-family: serif;
+  line-height: 1.5;
+  orphans: 2;
+  widows: 2;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  line-height: 1.2;
+  page-break-after: avoid;
+  break-after: avoid;
+  hyphens: manual;
+}
+h1 { font-size: 1.8em; margin: 1.2em 0 0.6em; }
+h2 { font-size: 1.4em; margin: 1em 0 0.5em; }
+h3 { font-size: 1.15em; margin: 1em 0 0.4em; }
+
+p {
+  margin: 0;
+  text-indent: 1.5em;
+  text-align: justify;
+  hyphens: auto;
+}
+h1 + p, h2 + p, h3 + p, figure + p, p.cont, p.first {
+  text-indent: 0;
+}
+
+/* Direction comes from the dir attribute (the CSS `direction` property is banned in EPUB). */
+[dir="rtl"] {
+  text-align: right;
+}
+p[dir="rtl"] {
+  text-align: center;
+  text-indent: 0;
+  margin: 0.6em 0;
+}
+:lang(ar), :lang(fa), :lang(ur) {
+  font-family: "Amiri", "Scheherazade New", serif;
+  line-height: 1.9;
+}
+
+blockquote, p.quote {
+  margin: 0.6em 1.5em;
+  text-indent: 0;
+}
+
+/* Figures: always fit the screen; never split across reader pages. */
+figure {
+  margin: 1em 0;
+  text-align: center;
+  page-break-inside: avoid;
+  break-inside: avoid;
+}
+figure img {
+  max-width: 100%;
+  max-height: 95vh;
+  height: auto;
+}
+figure.fig--float-left, figure.fig--float-right {
+  max-width: 50%;
+  margin: 0.3em 0 0.6em;
+}
+figure.fig--float-left { float: left; margin-right: 1em; }
+figure.fig--float-right { float: right; margin-left: 1em; }
+figure.fig--spread img { width: 100%; }
+figcaption {
+  font-size: 0.85em;
+  font-style: italic;
+  margin-top: 0.3em;
+  text-indent: 0;
+}
+
+a.noteref {
+  vertical-align: super;
+  font-size: 0.75em;
+  line-height: 0;
+  text-decoration: none;
+}
+aside.footnote {
+  font-size: 0.85em;
+  margin: 0.4em 0;
+}
+aside.footnote p { text-indent: 0; }
+section.notes {
+  margin-top: 1.5em;
+  border-top: 1px solid #999;
+  padding-top: 0.5em;
+}
+
+/* Printed special marks kept as images: scaled to the text line. */
+img.glyph {
+  height: 1.15em;
+  width: auto;
+  vertical-align: -0.2em;
+}
+
+span.pagebreak { display: inline; }
+section.page::after { content: ""; display: table; clear: both; }

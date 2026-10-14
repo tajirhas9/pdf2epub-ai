@@ -1,0 +1,91 @@
+[project]
+name = "pdf2epub"
+version = "0.1.0"
+description = "LLM-assisted PDF to reflowable EPUB3 converter"
+authors = [
+    { name = "Syed Tajir Hasnain", email = "tajircuet@gmail.com" }
+]
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "keyring>=25.7.0",
+    "numpy>=1.26,<2.4",
+    "openai>=3.31.0",
+    "opencv-python-headless>=5.0.0.93",
+    "paddleocr==3.7.0",
+    "pillow>=12.3.0",
+    "platformdirs>=4.13.0",
+    "playwright>=1.64.0",
+    "pydantic>=2.14.1",
+    "pydantic-settings>=2.15.0",
+    "pymupdf>=1.28.2",
+    "rich>=15.0.0",
+    "tomli-w>=1.2.0",
+    "typer>=0.27.3",
+    "wordfreq>=3.1.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/tajirhas9/pdf2epub-ai"
+Repository = "https://github.com/tajirhas9/pdf2epub-ai"
+Issues = "https://github.com/tajirhas9/pdf2epub-ai/issues"
+
+[project.optional-dependencies]
+# Pick one. GPU wheels come from Paddle's index (see README › Install).
+cpu = ["paddlepaddle==3.3.1"]
+gpu = ["paddlepaddle-gpu==3.4.0"]
+
+[project.scripts]
+pdf2epub = "pdf2epub.cli:entry"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pdf2epub"]
+
+# Builds the web app into the wheel (pdf2epub/webui/dist) so `pdf2epub ui` starts without Node (hatch_build.py).
+[tool.hatch.build.targets.wheel.hooks.custom]
+
+# The Vue/Vite sources ship inside the package; node deps are installed into the user cache on first use.
+[tool.hatch.build.targets.wheel.force-include]
+"web/src" = "pdf2epub/_web/src"
+"web/plugins" = "pdf2epub/_web/plugins"
+"web/index.html" = "pdf2epub/_web/index.html"
+"web/ui.html" = "pdf2epub/_web/ui.html"
+"web/vite.ui.config.ts" = "pdf2epub/_web/vite.ui.config.ts"
+"web/env.d.ts" = "pdf2epub/_web/env.d.ts"
+"web/package.json" = "pdf2epub/_web/package.json"
+"web/package-lock.json" = "pdf2epub/_web/package-lock.json"
+"web/tsconfig.json" = "pdf2epub/_web/tsconfig.json"
+"web/vite.config.ts" = "pdf2epub/_web/vite.config.ts"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[[tool.uv.index]]
+name = "paddle-cu129"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cu129/"
+explicit = true
+
+[tool.uv.sources]
+paddlepaddle-gpu = { index = "paddle-cu129" }
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "gpu" }]]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B023"]  # helper closures are called inside the loop iteration that defines them

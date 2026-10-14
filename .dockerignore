@@ -1,0 +1,12 @@
+.venv
+.cache
+work
+out
+web/node_modules
+web/dist*
+sample
+eval/results
+.env.local
+.pdf2epub.toml
+**/__pycache__
+.git
