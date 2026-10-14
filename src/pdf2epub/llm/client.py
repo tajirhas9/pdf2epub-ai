@@ -56,6 +56,10 @@ class LLMError(RuntimeError):
     pass
 
 
+class LLMUnavailable(LLMError):
+    """The server is down or not answering (after the SDK's retries): pause, don't fail the page."""
+
+
 class LLMClient(Protocol):
     async def complete_json(self, system: str, text: str, images: list[ImagePart], schema: dict, name: str) -> dict: ...
 
@@ -170,7 +174,7 @@ class OpenAICompatClient:
                 f"{self.s.base_url} rejected the API key — set it with `pdf2epub config set llm.api_key`"
             ) from e
         except openai.APIConnectionError as e:
-            raise LLMError(f"cannot reach the LLM at {self.s.base_url}") from e
+            raise LLMUnavailable(f"cannot reach the LLM at {self.s.base_url}") from e
         except openai.PermissionDeniedError as e:
             raise LLMError(f"{self.s.base_url} refused the request (403): {_server_message(e)}") from e
         except openai.APIStatusError:
@@ -216,8 +220,10 @@ class OpenAICompatClient:
                 raise LLMError(
                     f"{name}: authentication failed for {self.s.base_url} — set LLM_API_KEY in .env.local"
                 ) from e
-            except openai.APIConnectionError as e:
-                raise LLMError(f"{name}: cannot reach {self.s.base_url}: {e}") from e
+            except openai.APIConnectionError as e:  # incl. timeouts
+                raise LLMUnavailable(f"{name}: cannot reach {self.s.base_url}: {e}") from e
+            except openai.InternalServerError as e:  # 5xx still failing after the retries
+                raise LLMUnavailable(f"{name}: {self.s.base_url} is not answering: {_server_message(e)}") from e
             choice = resp.choices[0]
             content = choice.message.content or ""
             if not content.strip():

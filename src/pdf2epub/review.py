@@ -13,9 +13,10 @@ from PIL import Image
 from pdf2epub.codegen.vue_page import VuePageWriter
 from pdf2epub.config import Settings
 from pdf2epub.ir import BlockType, Document, Page, Role
-from pdf2epub.llm.client import ImagePart, LLMError, OpenAICompatClient
+from pdf2epub.llm.client import ImagePart, LLMError, LLMUnavailable, OpenAICompatClient
 from pdf2epub.llm.ops import OPS_SCHEMA, OpApplier, payload_text
 from pdf2epub.pipeline import Context, load_checkpoint, save_checkpoint
+from pdf2epub.resume import PagePartials, Paused, atomic_write_text, read_json
 from pdf2epub.stages.order import mark_continuations
 
 SYSTEM = resources.files("pdf2epub.llm.prompts").joinpath("page_review.md").read_text()
@@ -167,6 +168,8 @@ async def resolve_glyphs(client: OpenAICompatClient, doc: Document, settings: Se
                 GLYPH_SCHEMA,
                 "glyph_resolve",
             )
+        except LLMUnavailable:
+            raise
         except LLMError as e:
             log.append(
                 {"page": page.index + 1, "status": "rejected", "reason": f"glyph {g.key}: {e}", "op": {"op": "glyph"}}
@@ -275,6 +278,8 @@ async def check_spreads(client: OpenAICompatClient, doc: Document, settings: Set
             reply = await client.complete_json(
                 SPREAD_SYSTEM, "Is this one picture across both pages?", images, SPREAD_SCHEMA, "spread_check"
             )
+        except LLMUnavailable:
+            raise
         except LLMError as e:
             log.append(
                 {
@@ -332,17 +337,40 @@ async def _start_renderer(settings: Settings, book_dir: Path, rep):
         return None
 
 
-async def run_review(settings: Settings, book_dir: Path, pages: set[int] | None, rep=None) -> dict:
+async def run_review(
+    settings: Settings, book_dir: Path, pages: set[int] | None, rep=None, pause_requested=None
+) -> dict:
+    """Review pages one by one, saving each as it finishes (pdf2epub.resume): a pause, a crash or the
+    LLM server going away loses at most the pages in flight. Unreachable server -> Paused."""
+    try:
+        return await _run_review(settings, book_dir, pages, rep, pause_requested)
+    except LLMUnavailable as e:
+        raise Paused(f"llm-unreachable: {e}") from e
+
+
+async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None, rep, pause_requested) -> dict:
     ctx = Context(settings=settings, book_dir=book_dir, source=Path(""), pages=pages)
+    if pause_requested is not None:
+        ctx.pause_requested = pause_requested
     doc: Document | None = load_checkpoint(ctx)
     if doc is None:
         raise FileNotFoundError("no IR checkpoint — run `pdf2epub convert` first")
-    todo = [p for p in ctx.selected(doc) if needs_review(p, settings.llm.review_policy)]
+    # Saved progress is valid while the pipeline hasn't rerun since (it clears it when it does).
+    resumed = (read_json(ctx.ir_dir / "latest.json") or {}).get("stage") == "review-pre"
+    partials = PagePartials(ctx.ir_dir, "review")
+    pre_log = partials.dir / "_pre.json"
+    restored = partials.load() if resumed else {}
+    logs: list[dict] = list((read_json(pre_log) or {}).get("log", [])) if resumed else []
+    for i, (page, extra) in sorted(restored.items()):
+        if 0 <= i < len(doc.pages):
+            doc.pages[i] = page
+            logs.extend(extra)
+    todo = [p for p in ctx.selected(doc) if p.index in restored or needs_review(p, settings.llm.review_policy)]
+    pending = [p for p in todo if p.index not in restored]
     client = OpenAICompatClient(settings.llm, cache_dir=book_dir / "llm" / "cache")
     sem = asyncio.Semaphore(max(1, settings.llm.concurrency))
-    logs: list[dict] = []
     failures: list[str] = []
-    done = 0
+    done = len(todo) - len(pending)
     t0 = time.perf_counter()
     writer = VuePageWriter(doc, book_dir)
 
@@ -358,58 +386,103 @@ async def run_review(settings: Settings, book_dir: Path, pages: set[int] | None,
         ok = sum(1 for x in log if x["status"] == "applied")
         return ok, len(log) - ok
 
+    def _note() -> str:
+        ok, bad = _count([x for x in logs if x["op"].get("op") not in ("spread", "glyph", "glyph-apply")])
+        return (
+            f"{ok} fixes" + (f" · {bad} rejected" if bad else "") + (f" · {len(failures)} failed" if failures else "")
+        )
+
+    halted: list[BaseException] = []  # once the server is gone or a pause is asked, start no more pages
+
     async def one(page: Page) -> None:
         nonlocal done
         async with sem:
+            if halted:
+                return
+            try:
+                ctx.check_pause()  # a pause lets the pages in flight finish, then stops here
+            except Paused as e:
+                halted.append(e)
+                raise
             t = time.perf_counter()
             try:
-                logs.extend(await review_page(client, page, settings, book_dir, renderer))
-            except LLMError as e:
+                entries = await review_page(client, page, settings, book_dir, renderer)
+            except LLMUnavailable as e:
+                halted.append(e)
+                raise
+            except LLMError as e:  # not saved: retried when the review is resumed
                 failures.append(f"p{page.index + 1}: {e}")
                 page.flags.append("review:failed")
-            page.timings["review"] = round(time.perf_counter() - t, 2)
+            else:
+                page.timings["review"] = round(time.perf_counter() - t, 2)
+                logs.extend(entries)
+                partials.save(page, entries)
             writer.write_page(page)  # live update in the workbench via HMR
             done += 1
             if rep:
-                ok, bad = _count([x for x in logs if x["op"].get("op") not in ("spread", "glyph", "glyph-apply")])
-                note = (
-                    f"{ok} fixes"
-                    + (f" · {bad} rejected" if bad else "")
-                    + (f" · {len(failures)} failed" if failures else "")
-                )
-                rep.advance("review", done, len(todo), note)
+                rep.advance("review", done, len(todo), _note())
 
+    step = "review"  # the step a pause interrupts
     try:
-        if settings.llm.review_policy != "none":
-            candidates = [sp for sp in doc.spreads if sp.status == SpreadStatus.CANDIDATE]
-            if candidates:
-                rep and rep.start("spread_check", len(candidates))
-                entries = await check_spreads(client, doc, settings, book_dir)
-                logs.extend(entries)
-                joined = sum(1 for x in entries if x["op"].get("same_picture"))
-                rep and rep.done("spread_check", f"{joined} joined, {len(candidates) - joined} kept apart")
-            pending = [g for g in doc.glyphs.values() if not g.resolved]
-            if pending:
-                rep and rep.start("glyph_check", len(pending))
-                logs.extend(await resolve_glyphs(client, doc, settings, book_dir))
-                rep and rep.done("glyph_check", _glyph_note(doc))
-            writer.write_all()
-        rep and rep.start("review", len(todo))
-        await asyncio.gather(*(one(p) for p in todo))
+        if not resumed:
+            pre: list[dict] = []
+            if settings.llm.review_policy != "none":
+                candidates = [sp for sp in doc.spreads if sp.status == SpreadStatus.CANDIDATE]
+                if candidates:
+                    step = "spread_check"
+                    rep and rep.start(step, len(candidates))
+                    entries = await check_spreads(client, doc, settings, book_dir)
+                    pre.extend(entries)
+                    joined = sum(1 for x in entries if x["op"].get("same_picture"))
+                    rep and rep.done("spread_check", f"{joined} joined, {len(candidates) - joined} kept apart")
+                pending_glyphs = [g for g in doc.glyphs.values() if not g.resolved]
+                if pending_glyphs:
+                    step = "glyph_check"
+                    rep and rep.start(step, len(pending_glyphs))
+                    pre.extend(await resolve_glyphs(client, doc, settings, book_dir))
+                    rep and rep.done("glyph_check", _glyph_note(doc))
+                writer.write_all()
+            logs.extend(pre)
+            partials.clear()  # left by an earlier review of this same input (e.g. other pages)
+            atomic_write_text(pre_log, json.dumps({"log": pre}, ensure_ascii=False))
+            save_checkpoint(doc, ctx, "review-pre")
+            done = 0
+            pending = todo = [p for p in ctx.selected(doc) if needs_review(p, settings.llm.review_policy)]
+        step = "review"
+        rep and rep.start(step, len(todo))
+        if rep and done:
+            rep.advance("review", done, len(todo), _note())
+        tasks = [asyncio.create_task(one(p)) for p in pending]
+        try:
+            await asyncio.gather(*tasks)
+            if halted:  # a task that saw `halted` returned quietly; report why the review stopped
+                raise halted[0]
+        except BaseException:  # paused / server gone: stop the rest, keep what finished
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         if rep:
             ok, bad = _count([x for x in logs if x["op"].get("op") not in ("spread", "glyph", "glyph-apply")])
             rep.done("review", f"{ok} fixes applied" + (f", {bad} rejected by checks" if bad else ""))
         before = len(logs)
+        step = "inserted_marks"
         logs.extend(await verify_inserted_marks(client, doc, settings, book_dir))
         if rep and len(logs) > before:
             rep.start("inserted_marks")
             rep.done("inserted_marks", logs[-1]["reason"].replace("inserted marks: ", ""))
+    except Paused:
+        if rep:
+            rep.fail(step, "paused")
+        raise
     finally:
         await client.close()
         if renderer is not None:
             await renderer.__aexit__(None, None, None)
     mark_continuations(doc.pages)
     save_checkpoint(doc, ctx, "review")
+    partials.clear()
+    (ctx.ir_dir / "review-pre.json").unlink(missing_ok=True)
     writer.write_all()
     (book_dir / "llm").mkdir(parents=True, exist_ok=True)
     with (book_dir / "llm" / "ops-log.jsonl").open("a") as f:

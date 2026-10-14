@@ -59,7 +59,7 @@ export interface ConvertOptions {
 export interface Step {
   key: string
   label: string
-  status: 'running' | 'done' | 'failed'
+  status: 'running' | 'done' | 'failed' | 'paused'
   done: number
   total: number | null
   note: string
@@ -70,7 +70,9 @@ export interface Job {
   id: string
   file: Upload
   options: ConvertOptions
-  status: 'queued' | 'running' | 'cancelling' | 'done' | 'failed' | 'cancelled'
+  status: 'queued' | 'running' | 'pausing' | 'paused' | 'cancelling' | 'done' | 'failed' | 'cancelled'
+  /** while paused: 'paused' (by hand), 'interrupted' (app stopped), 'llm-unreachable: …' */
+  reason: string
   steps: Step[]
   created: number
   elapsed: number
@@ -121,6 +123,8 @@ export const api = {
   jobs: () => call<Job[]>('GET', 'jobs'),
   convert: (upload_id: string, options: ConvertOptions) => call<Job>('POST', 'jobs', { upload_id, options }),
   cancel: (id: string) => call('POST', `jobs/${id}/cancel`),
+  pause: (id: string) => call('POST', `jobs/${id}/pause`),
+  resume: (id: string) => call('POST', `jobs/${id}/resume`),
   removeJob: (id: string) => call('DELETE', `jobs/${id}`),
   getUpload: (id: string) => call<Upload>('GET', `uploads/${id}`),
   removeUpload: (id: string) => call('DELETE', `uploads/${id}`),

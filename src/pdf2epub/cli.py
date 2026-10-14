@@ -57,6 +57,10 @@ LLM_OPT = typer.Option(
     "--no-llm is fastest and fine for clean digital PDFs.",
     show_default=False,
 )
+RESTART_OPT = typer.Option(
+    "--restart",
+    help="Start over instead of continuing an unfinished (paused or interrupted) conversion of this file.",
+)
 OUTPUT_OPT = typer.Option(
     "-o",
     "--output",
@@ -170,10 +174,53 @@ def _reporting():
         rep.stop()
 
 
-def _convert_steps(settings: Settings, source: Path, pages: set[int] | None, from_stage: str | None, rep):
-    from pdf2epub import app as core
+@contextmanager
+def _pausable():
+    """First Ctrl+C pauses after the pages in progress; a second one stops at once. Progress is kept
+    either way and the next run of the same command continues from it."""
+    import signal
+    import threading
 
-    return core.convert_and_review(settings, source, pages, from_stage, rep)
+    flag = threading.Event()
+    if threading.current_thread() is not threading.main_thread():
+        yield flag.is_set
+        return
+    previous = signal.getsignal(signal.SIGINT)
+
+    def handler(signum, frame):
+        if flag.is_set():
+            signal.signal(signal.SIGINT, previous)
+            raise KeyboardInterrupt
+        flag.set()
+        console.print("\n[yellow]Pausing after the current page…[/] [dim](Ctrl+C again to stop now)[/]")
+
+    signal.signal(signal.SIGINT, handler)
+    try:
+        yield flag.is_set
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def _convert_steps(
+    settings: Settings, source: Path, pages: set[int] | None, from_stage: str | None, rep, restart: bool = False
+):
+    from pdf2epub import app as core
+    from pdf2epub.resume import describe
+
+    def resuming(run: dict) -> None:
+        console.print(f"[cyan]Resuming:[/] {describe(run)}", highlight=False)
+
+    with _pausable() as pause_requested:
+        return core.convert_and_review(
+            settings,
+            source,
+            pages,
+            from_stage,
+            rep,
+            resume=False if restart else None,
+            pause_requested=pause_requested,
+            on_resume=resuming,
+        )
 
 
 def _finish(settings: Settings, book_dir: Path, res, t0: float) -> None:
@@ -209,13 +256,14 @@ def convert(
     from_stage: Annotated[str | None, typer.Option(help="Resume from this stage")] = None,
     langs: Annotated[str | None, typer.Option(help="Language hints, e.g. en,ar (scripts are auto-detected)")] = None,
     llm: Annotated[bool | None, LLM_OPT] = None,
+    restart: Annotated[bool, RESTART_OPT] = False,
 ) -> None:
     """Extract pages and generate one Vue page per PDF page (then LLM review); no EPUB yet."""
     settings = _settings(langs, llm=llm)
     _header(source.name, _source_details(source, settings))
     t = time.perf_counter()
     with _reporting() as rep:
-        doc, ctx = _convert_steps(settings, source, _parse_pages(pages), from_stage, rep)
+        doc, ctx = _convert_steps(settings, source, _parse_pages(pages), from_stage, rep, restart)
     console.print()
     console.print(
         f"[green]✓[/] Converted {len(doc.pages)} pages in {time.perf_counter() - t:.0f}s. Next:", highlight=False
@@ -239,8 +287,8 @@ def review(
         settings.llm.review_policy = policy
     book_dir = core.resolve_book(settings, book)
     _header(f"review {book_dir.name}", [_llm_line(settings)])
-    with _reporting() as rep:
-        summary = core.review(settings, book_dir, _parse_pages(pages), rep)
+    with _reporting() as rep, _pausable() as pause_requested:
+        summary = core.review(settings, book_dir, _parse_pages(pages), rep, pause_requested)
     console.print()
     console.print(f"[green]✓[/] {summary['text']}", highlight=False)
 
@@ -377,7 +425,7 @@ def ui(
         busy = any(j["status"] in ("running", "cancelling") for j in web.runner.list())
         console.print(
             "[dim]stopped"
-            + (" · the running conversion keeps its work files and resumes next time[/]" if busy else "[/]")
+            + (" · the running conversion is saved; resume it from the web app next time[/]" if busy else "[/]")
         )
     finally:
         server.shutdown()
@@ -408,6 +456,7 @@ def run(
     output: Annotated[Path | None, OUTPUT_OPT] = None,
     llm: Annotated[bool | None, LLM_OPT] = None,
     keep_work: Annotated[bool, typer.Option(help="Keep intermediates after a successful build")] = False,
+    restart: Annotated[bool, RESTART_OPT] = False,
 ) -> None:
     """One shot: convert → (LLM review) → build EPUB → validate → clean up."""
     from pdf2epub import app as core
@@ -417,7 +466,7 @@ def run(
     _header(source.name, _source_details(source, settings))
     t = time.perf_counter()
     with _reporting() as rep:
-        _, ctx = _convert_steps(settings, source, None, None, rep)
+        _, ctx = _convert_steps(settings, source, None, None, rep, restart)
         res = core.build(settings, ctx.book_dir, out, reporter=rep)
     _finish(settings, ctx.book_dir, res, t)
 
@@ -641,13 +690,23 @@ app.command(rich_help_panel="Development", help="Print the IR JSON schema (TypeS
 
 
 def entry() -> None:
+    from pdf2epub.resume import Paused
     from pdf2epub.ui import error_panel
 
     try:
         app()
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted.[/] Nothing was written to the output; intermediate files are kept.")
+        console.print(
+            "\n[yellow]Stopped.[/] Nothing was written to the output; the progress is kept — "
+            "run the same command again to continue."
+        )
         raise SystemExit(130) from None
+    except Paused as exc:
+        from pdf2epub.app import pause_text
+
+        console.print(f"\n[yellow]{pause_text(exc.reason)}.[/] Progress is saved.", highlight=False)
+        console.print("Run the same command again to continue where it stopped.")
+        raise SystemExit(75) from None  # EX_TEMPFAIL
     except Exception as exc:  # noqa: BLE001 - top-level presentation
         if VERBOSE:
             console.print_exception(show_locals=False)

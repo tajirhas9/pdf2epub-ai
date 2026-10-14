@@ -9,6 +9,8 @@ const emit = defineEmits<{ changed: [] }>()
 const STATUS = {
   queued: { text: 'Waiting', cls: '' },
   running: { text: 'Converting', cls: 'accent' },
+  pausing: { text: 'Pausing…', cls: 'warn' },
+  paused: { text: 'Paused', cls: 'warn' },
   cancelling: { text: 'Stopping…', cls: 'warn' },
   done: { text: 'Done', cls: 'ok' },
   failed: { text: 'Failed', cls: 'err' },
@@ -16,7 +18,17 @@ const STATUS = {
 } as const
 const preparing = computed(() => props.job.status === 'queued' && (props.job.waiting === 'models' || props.job.waiting === 'download'))
 const status = computed(() => (preparing.value ? { text: 'Preparing', cls: 'accent' } : STATUS[props.job.status]))
-const active = computed(() => ['queued', 'running', 'cancelling'].includes(props.job.status))
+const active = computed(() => ['queued', 'running', 'pausing', 'cancelling'].includes(props.job.status))
+const pauseReason = computed(() => {
+  const reason = props.job.reason
+  if (reason.startsWith('llm-unreachable')) return { title: 'The AI server stopped answering', hint: 'Start it again, then press Resume.', detail: reason.slice(reason.indexOf(':') + 1).trim() }
+  if (reason === 'interrupted') return { title: 'Interrupted', hint: 'The app or computer stopped during the conversion. Press Resume to continue.', detail: '' }
+  return { title: 'Paused', hint: 'Press Resume to continue.', detail: '' }
+})
+const done = computed(() => {
+  const s = [...props.job.steps].reverse().find((x) => x.total)
+  return s ? `${s.label}: ${s.done} / ${s.total}` : ''
+})
 const current = computed(() => [...props.job.steps].reverse().find((s) => s.status === 'running'))
 const showSteps = ref(false)
 const r = computed(() => props.job.result)
@@ -37,6 +49,8 @@ async function act(fn: () => Promise<unknown>) {
   }
 }
 const stop = () => act(() => api.cancel(props.job.id))
+const pause = () => act(() => api.pause(props.job.id))
+const resume = () => act(() => api.resume(props.job.id))
 const remove = () => act(() => api.removeJob(props.job.id))
 const again = () => act(() => api.convert(props.job.file.id, props.job.options))
 
@@ -119,6 +133,13 @@ const pct = (s: { done: number; total: number | null }) => (s.total ? Math.round
       <p v-if="r.work_dir" class="muted small">Intermediate files kept: <code>{{ r.work_dir }}</code> — inspect with <code>pdf2epub dev</code></p>
     </div>
 
+    <!-- paused: progress is saved after every page -->
+    <div v-if="job.status === 'paused'" class="notice" :class="{ err: job.reason.startsWith('llm-unreachable') }">
+      <p><b>{{ pauseReason.title }}</b><span v-if="done" class="muted"> · {{ done }}</span></p>
+      <p class="small">{{ pauseReason.hint }} It continues from the last finished page.</p>
+      <pre v-if="pauseReason.detail">{{ pauseReason.detail }}</pre>
+    </div>
+
     <!-- failed -->
     <div v-if="job.status === 'failed' && job.error" class="notice err">
       <p><b>{{ job.error.message }}</b></p>
@@ -139,7 +160,20 @@ const pct = (s: { done: number; total: number | null }) => (s.total ? Math.round
         {{ showSteps ? 'Hide steps' : `Show all steps (${job.steps.length})` }}
       </button>
       <span class="spacer" />
-      <button v-if="active" type="button" class="btn" :disabled="job.status === 'cancelling'" @click="stop">Stop</button>
+      <template v-if="active">
+        <button
+          v-if="job.status === 'running' || job.status === 'queued'"
+          type="button"
+          class="btn"
+          title="Saves the progress and stops after the current page"
+          @click="pause"
+        >Pause</button>
+        <button type="button" class="btn" :disabled="job.status === 'cancelling'" @click="stop">Stop</button>
+      </template>
+      <template v-else-if="job.status === 'paused'">
+        <button type="button" class="btn primary" @click="resume">Resume</button>
+        <button type="button" class="btn ghost" title="Discards the saved progress" @click="remove">Remove</button>
+      </template>
       <template v-else>
         <button v-if="job.status !== 'done'" type="button" class="btn" @click="again">Convert again</button>
         <button type="button" class="btn ghost" @click="remove">Remove</button>
@@ -149,7 +183,7 @@ const pct = (s: { done: number; total: number | null }) => (s.total ? Math.round
       <li v-for="s in job.steps" :key="s.key" :class="s.status">
         <span class="icon" aria-hidden="true">
           <span v-if="s.status === 'running'" class="spinner" />
-          <template v-else>{{ s.status === 'done' ? '✓' : '✕' }}</template>
+          <template v-else>{{ s.status === 'done' ? '✓' : s.status === 'paused' ? '⏸' : '✕' }}</template>
         </span>
         <span class="name">{{ s.label }}</span>
         <span class="count muted">{{ s.total ? `${s.done}/${s.total}` : '' }}</span>
@@ -186,4 +220,5 @@ footer { border-top: 1px solid var(--line); padding-top: 0.75rem; }
 .steps .time, .steps .count { text-align: right; font-variant-numeric: tabular-nums; }
 .steps li.done .icon { color: var(--ok); }
 .steps li.failed .icon { color: var(--err); }
+.steps li.paused .icon { color: var(--warn); }
 </style>

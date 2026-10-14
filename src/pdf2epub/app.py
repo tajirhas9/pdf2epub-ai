@@ -86,17 +86,26 @@ def convert(
     pages: set[int] | None = None,
     from_stage: str | None = None,
     reporter=None,
+    resume: bool = False,
+    pause_requested=None,
 ) -> tuple[Document, Context]:
     doc = open_document(source)
     doc.language = settings.langs[0] if settings.langs else "en"
     ctx = make_context(settings, source, doc.id, pages, reporter)
+    ctx.resume = resume
+    if pause_requested is not None:
+        ctx.pause_requested = pause_requested
     if from_stage or pages is not None:
         doc = load_checkpoint(ctx) or doc
     pipeline = build_pipeline(settings)
     names = pipeline.names()
-    if from_stage is None or names.index(from_stage) <= names.index("glyphs"):
-        preload_models(settings, reporter)
-    doc = pipeline.run(doc, ctx, from_stage=from_stage)
+    if resume and from_stage is None and (point := pipeline.resume_point(ctx)) is not None:
+        doc = load_checkpoint(ctx) or doc
+        from_stage = point  # "" = every stage already done
+    if from_stage != "":
+        if from_stage is None or "glyphs" not in names or names.index(from_stage) <= names.index("glyphs"):
+            preload_models(settings, reporter)
+        doc = pipeline.run(doc, ctx, from_stage=from_stage)
     if not settings.langs:
         doc.language = detect_language(doc)
     write_pages(doc, ctx)
@@ -130,23 +139,109 @@ def llm_preflight(settings: Settings, rep=None) -> str:
     return model
 
 
-def review(settings: Settings, book_dir: Path, pages: set[int] | None = None, rep=None) -> dict:
+def review(settings: Settings, book_dir: Path, pages: set[int] | None = None, rep=None, pause_requested=None) -> dict:
     import asyncio
 
     from pdf2epub.review import run_review
 
-    return asyncio.run(run_review(settings, book_dir, pages, rep))
+    return asyncio.run(run_review(settings, book_dir, pages, rep, pause_requested))
+
+
+class RunTracker:
+    """Reporter wrapper that records the current step in run.json (shown when the run is resumed)."""
+
+    def __init__(self, inner, book_dir: Path):
+        self.inner = inner
+        self.book_dir = book_dir
+
+    def _mark(self, key: str, done: int, total: int | None) -> None:
+        from pdf2epub.resume import write_run
+
+        write_run(self.book_dir, phase=key, done=done, total=total)
+
+    def start(self, key, total=None, note=""):
+        self._mark(key, 0, total)
+        if self.inner:
+            self.inner.start(key, total, note)
+
+    def advance(self, key, done, total=None, note=None):
+        self._mark(key, done, total)
+        if self.inner:
+            self.inner.advance(key, done, total, note)
+
+    def done(self, key, note=""):
+        if self.inner:
+            self.inner.done(key, note)
+
+    def fail(self, key, note=""):
+        if self.inner:
+            self.inner.fail(key, note)
+
+    def stop(self):
+        if self.inner:
+            self.inner.stop()
 
 
 def convert_and_review(
-    settings: Settings, source: Path, pages: set[int] | None = None, from_stage: str | None = None, reporter=None
+    settings: Settings,
+    source: Path,
+    pages: set[int] | None = None,
+    from_stage: str | None = None,
+    reporter=None,
+    resume: bool | None = None,
+    pause_requested=None,
+    web: dict | None = None,
+    on_resume=None,
 ) -> tuple[Document, Context]:
-    """convert, then the LLM review when enabled (the CLI's `convert`/`run` and the web UI share this)."""
-    if settings.llm.enabled:
-        llm_preflight(settings, reporter)
-    doc, ctx = convert(settings, source, pages, from_stage, reporter=reporter)
-    if settings.llm.enabled:
-        review(settings, ctx.book_dir, pages, reporter)
+    """convert, then the LLM review when enabled (the CLI's `convert`/`run` and the web UI share this).
+
+    A whole-book run continues an unfinished earlier run of the same file (resume=None: automatic;
+    False: start over). Pause/stop/unreachable LLM -> pdf2epub.resume.Paused, progress kept."""
+    from pdf2epub.llm.client import LLMUnavailable
+    from pdf2epub.resume import Paused, fingerprint, latest_stage, reset, resumable, run_options, write_run
+
+    source = source.resolve()
+    book_dir = settings.book_dir(book_id_for(source))
+    whole = pages is None and from_stage is None
+    run = None
+    if whole:
+        if resume is not False:
+            run = resumable(settings, source, book_dir)  # raises OptionsChanged
+        if run is None:  # starting over: progress of an earlier run would be mixed in
+            reset(book_dir)
+        if run and on_resume:
+            on_resume(run)
+        book_dir.mkdir(parents=True, exist_ok=True)
+        write_run(
+            book_dir,
+            source=str(source),
+            fingerprint=fingerprint(source),
+            options=run_options(settings),
+            status="running",
+            reason="",
+            web=web if web is not None else (run or {}).get("web"),
+        )
+        reporter = RunTracker(reporter, book_dir)
+    reviewed = run is not None and latest_stage(book_dir) == "review"  # paused after the review
+    try:
+        if settings.llm.enabled and not reviewed:
+            try:
+                llm_preflight(settings, reporter)
+            except LLMUnavailable as e:
+                if run is None:
+                    raise
+                raise Paused(f"llm-unreachable: {e}") from e  # resuming: keep the progress, try later
+        doc, ctx = convert(
+            settings, source, pages, from_stage, reporter, resume=run is not None, pause_requested=pause_requested
+        )
+        if settings.llm.enabled and not reviewed:
+            review(settings, ctx.book_dir, pages, reporter, pause_requested)
+    except BaseException as e:
+        if whole:
+            write_run(book_dir, status="paused", reason=e.reason if isinstance(e, Paused) else "interrupted")
+        raise
+    if whole:
+        write_run(book_dir, status="converted", reason="")
     save_stats(ctx)
     return doc, ctx
 
@@ -158,8 +253,13 @@ def latest_doc(settings: Settings, book_dir: Path) -> Document | None:
 def explain_error(exc: BaseException) -> tuple[str, str]:
     """(message, hint) for errors users can act on."""
     from pdf2epub.llm.client import LLMError
+    from pdf2epub.resume import OptionsChanged, Paused
     from pdf2epub.runtime import RuntimeMissing
 
+    if isinstance(exc, Paused):
+        return pause_text(exc.reason), "Run the same command again to continue where it stopped."
+    if isinstance(exc, OptionsChanged):
+        return str(exc), ""
     if isinstance(exc, LLMError):
         return str(exc), "Check the endpoint with `pdf2epub llm-check`, or skip the review with --no-llm."
     if isinstance(exc, BuildError):
@@ -172,6 +272,13 @@ def explain_error(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, RuntimeError) and "PaddlePaddle is not installed" in str(exc):
         return str(exc), ""
     return f"{type(exc).__name__}: {exc}", "Run with -v for the full traceback."
+
+
+def pause_text(reason: str) -> str:
+    if reason.startswith("llm-unreachable"):
+        detail = reason.partition(":")[2].strip()
+        return "Paused: the AI server stopped answering" + (f" ({detail})" if detail else "")
+    return "Paused" if reason in ("", "paused") else f"Paused ({reason})"
 
 
 def detect_language(doc: Document) -> str:
@@ -302,6 +409,10 @@ def build(settings: Settings, book_dir: Path, out: Path | None = None, reporter=
             reporter.fail("validate", "problems found (see report)")
     report = out.with_suffix(".report.json")
     report.write_text(json.dumps(build_report(book_dir, valid, output), indent=1, ensure_ascii=False))
+    if valid is not False and (book_dir / "run.json").exists():
+        from pdf2epub.resume import write_run
+
+        write_run(book_dir, status="done")
     return BuildResult(out, report, valid, output, round(time.perf_counter() - t, 2))
 
 

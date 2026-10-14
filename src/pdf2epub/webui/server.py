@@ -217,6 +217,12 @@ class Handler(BaseHTTPRequestHandler):
             case ("POST", ["jobs", jid, "cancel"]):
                 runner.cancel(jid)
                 self._json({"ok": True})
+            case ("POST", ["jobs", jid, "pause"]):
+                runner.pause(jid)
+                self._json({"ok": True})
+            case ("POST", ["jobs", jid, "resume"]):
+                runner.resume(jid)
+                self._json({"ok": True})
             case ("DELETE", ["jobs", jid]):
                 runner.remove(jid)
                 self._json({"ok": True})

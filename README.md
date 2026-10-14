@@ -378,6 +378,28 @@ Where files live:
 
 ---
 
+## Pause & resume
+
+Long AI reviews can take hours on a local model. Progress is saved after every page, so nothing is
+lost when you pause, when the computer loses power, or when the AI server stops.
+
+- **Terminal:** press **Ctrl+C** once to pause after the current page (press it twice to stop at
+  once; the saved pages are kept either way). To continue, run the same command again:
+  `pdf2epub run book.pdf` picks up where it stopped (`Resuming: stopped during LLM: review pages
+  (143/400 pages done)`). To start over, add `--restart`.
+- **Web app:** use **Pause** and **Resume** on the conversion card. If the app or the computer
+  stopped mid-conversion, the job shows up as *Interrupted* the next time you start `pdf2epub ui`.
+  Press **Resume** to continue. **Remove** discards the saved progress.
+- **AI server stops answering** (crashed, unloaded, unreachable): the conversion pauses on its own
+  (exit code 75 in the terminal) instead of skipping the remaining pages. Start the server again,
+  then resume.
+
+The saved progress belongs to that PDF and those options (languages, GPU, AI review on/off,
+review policy). Changing one of them in the terminal asks for `--restart`. Uploading the same
+PDF again in the web app continues its progress.
+
+---
+
 ## Troubleshooting
 
 | problem | fix |

@@ -117,9 +117,11 @@ async function refresh() {
       const was = before.get(j.id)
       if (was && was !== j.status && j.status === 'done') toast(`${j.file.name} is ready`)
       if (was && was !== j.status && j.status === 'failed') toast(`${j.file.name} failed`, 'err')
+      if (was && was !== j.status && j.status === 'paused' && j.reason.startsWith('llm-unreachable'))
+        toast(`${j.file.name} paused: the AI server stopped answering`, 'err')
     }
   } catch { /* server restarting: keep the last view */ }
-  const busy = jobs.value.some((j) => ['queued', 'running', 'cancelling'].includes(j.status))
+  const busy = jobs.value.some((j) => ['queued', 'running', 'pausing', 'cancelling'].includes(j.status))
   timer = setTimeout(refresh, busy ? 800 : 4000)
 }
 onMounted(refresh)

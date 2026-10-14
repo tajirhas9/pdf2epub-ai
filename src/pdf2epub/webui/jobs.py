@@ -2,6 +2,9 @@
 
 One worker thread runs jobs in order (OCR models and the GPU are shared), so the vision models stay
 loaded between books. Uploading a file queues a warm-up so model loading overlaps with choosing options.
+
+Jobs can be paused and resumed. Each running job records itself in its book's run.json, so a job cut
+off by a restart or a power cut comes back as "paused" the next time the app starts.
 """
 
 from __future__ import annotations
@@ -46,7 +49,7 @@ class Job:
     id: str
     upload: Upload
     options: dict
-    status: str = "queued"  # queued | running | done | failed | cancelled
+    status: str = "queued"  # queued | running | paused | done | failed | cancelled
     steps: list[dict] = field(default_factory=list)
     created: float = field(default_factory=time.time)
     started: float | None = None
@@ -54,14 +57,22 @@ class Job:
     result: dict | None = None
     error: dict | None = None
     cancel: bool = False
+    pause: bool = False
+    reason: str = ""  # why it is paused: "paused" | "interrupted" | "llm-unreachable: …"
 
     def public(self, waiting: str | None = None) -> dict:
         end = self.finished or time.time()
+        status = self.status
+        if self.cancel and status in ("queued", "running"):
+            status = "cancelling"
+        elif self.pause and status == "running":
+            status = "pausing"
         return {
             "id": self.id,
             "file": self.upload.public(),
             "options": self.options,
-            "status": "cancelling" if self.cancel and self.status in ("queued", "running") else self.status,
+            "status": status,
+            "reason": self.reason if self.status == "paused" else "",
             "steps": [dict(s) for s in self.steps],
             "created": self.created,
             "elapsed": round(end - self.started, 1) if self.started else 0,
@@ -76,6 +87,9 @@ class JobReporter:
 
     def __init__(self, job: Job):
         self.job = job
+
+    def pause_requested(self) -> bool:
+        return self.job.pause
 
     def _check(self) -> None:
         if self.job.cancel:
@@ -158,9 +172,10 @@ def output_path(settings: Settings, options: dict, upload: Upload) -> Path | Non
 class JobRunner:
     def __init__(self, upload_dir: Path):
         self.upload_dir = upload_dir
-        self.clear_uploads()  # left over from an earlier run (nothing refers to them any more)
         self.uploads: dict[str, Upload] = {}
         self.jobs: dict[str, Job] = {}
+        self.restore()
+        self.clear_uploads()  # left over from an earlier run and not needed to resume a job
         self._queue: queue.Queue = queue.Queue()
         self._warm: set[tuple] = set()
         self.preparing: str | None = None  # "models" | "download" while the OCR models load
@@ -204,7 +219,32 @@ class JobRunner:
             shutil.rmtree(up.path.parent, ignore_errors=True)
 
     def clear_uploads(self) -> None:
-        shutil.rmtree(self.upload_dir, ignore_errors=True)
+        """Remove upload folders except the ones unfinished jobs need to resume."""
+        keep = {up.path.parent.resolve() for up in self.uploads.values()}
+        if not self.upload_dir.is_dir():
+            return
+        for folder in self.upload_dir.iterdir():
+            if folder.resolve() not in keep:
+                shutil.rmtree(folder, ignore_errors=True) if folder.is_dir() else folder.unlink(missing_ok=True)
+
+    def restore(self) -> None:
+        """Jobs of an earlier app run that didn't finish (paused, stopped by a restart or a power cut)."""
+        from pdf2epub.resume import RESUMABLE, read_run
+
+        for run_file in sorted(self.upload_dir.parent.glob("*/run.json")):
+            run = read_run(run_file.parent)
+            web = (run or {}).get("web")
+            if not web or run.get("status") not in RESUMABLE or run.get("status") == "converted":
+                continue
+            path = Path(web.get("upload", ""))
+            if not path.is_file() or not path.is_relative_to(self.upload_dir):
+                continue
+            up = Upload(path.parent.name, path, web["name"], web["title"], int(web["pages"]))
+            reason = (run["status"] == "paused" and run.get("reason")) or "interrupted"
+            job = Job(web["job_id"], up, dict(web.get("options") or {}), status="paused", reason=reason)
+            job.created = float(web.get("created") or run.get("updated") or time.time())
+            self.uploads[up.id] = up
+            self.jobs[job.id] = job
 
     # ---- jobs ----
 
@@ -221,12 +261,38 @@ class JobRunner:
         job = self.jobs[job_id]
         if job.status in ("queued", "running"):
             job.cancel = True
+        elif job.status == "paused":
+            job.status, job.finished = "cancelled", time.time()
+
+    def pause(self, job_id: str) -> None:
+        """Running: stop after the pages in progress (saved). Waiting: just don't start it yet."""
+        job = self.jobs[job_id]
+        if job.status == "running":
+            job.pause = True
+        elif job.status == "queued":  # its queue entry is skipped; Resume queues it again
+            job.status, job.reason, job.finished = "paused", "paused", time.time()
+        else:
+            raise ValueError("only a waiting or running conversion can be paused")
+
+    def resume(self, job_id: str) -> None:
+        job = self.jobs[job_id]
+        if job.status != "paused":
+            raise ValueError("this conversion is not paused")
+        job.pause, job.cancel, job.reason = False, False, ""
+        job.status, job.finished, job.error = "queued", None, None
+        self._queue.put(("job", job))
 
     def remove(self, job_id: str) -> None:
+        from pdf2epub.ingest import book_id_for
+        from pdf2epub.resume import read_run
+
         job = self.jobs[job_id]
         if job.status in ("queued", "running"):
             raise ValueError("stop the conversion first")
         del self.jobs[job_id]
+        book_dir = self.upload_dir.parent / book_id_for(job.upload.path)  # uploads live in work_dir/_uploads
+        if job.status != "done" and ((read_run(book_dir) or {}).get("web") or {}).get("job_id") == job.id:
+            shutil.rmtree(book_dir, ignore_errors=True)  # its saved progress: nothing can resume it now
         if not any(j.upload.id == job.upload.id for j in self.jobs.values()):
             self.remove_upload(job.upload.id)
 
@@ -272,16 +338,33 @@ class JobRunner:
         from pdf2epub import app as core
         from pdf2epub.app import epub_chapters, explain_error, latest_doc
         from pdf2epub.cleanup import cleanup_after_build
+        from pdf2epub.resume import OptionsChanged, Paused
         from pdf2epub.ui import attention_items
 
         if job.cancel:
             job.status, job.finished = "cancelled", time.time()
             return
+        if job.status != "queued":  # paused while waiting (and maybe queued again by Resume)
+            return
         job.status, job.started = "running", time.time()
         rep = JobReporter(job)
         try:
             settings = job_settings(job.options)
-            _, ctx = core.convert_and_review(settings, job.upload.path, None, None, rep)
+            web = {
+                "job_id": job.id,
+                "name": job.upload.name,
+                "title": job.upload.title,
+                "pages": job.upload.pages,
+                "upload": str(job.upload.path),
+                "options": job.options,
+                "created": job.created,
+            }
+            convert = core.convert_and_review
+            try:
+                _, ctx = convert(settings, job.upload.path, None, None, rep, None, rep.pause_requested, web)
+            except OptionsChanged:  # new options for a book with unfinished progress: start over
+                job.steps.clear()
+                _, ctx = convert(settings, job.upload.path, None, None, rep, False, rep.pause_requested, web)
             res = core.build(settings, ctx.book_dir, output_path(settings, job.options, job.upload), reporter=rep)
             doc = latest_doc(settings, ctx.book_dir)
             removed = cleanup_after_build(ctx.book_dir, res.valid is not False, settings.keep_work)
@@ -301,6 +384,11 @@ class JobRunner:
             if removed:  # the PDF copy is only needed to resume a failed conversion
                 self.uploads.pop(job.upload.id, None)
                 shutil.rmtree(job.upload.path.parent, ignore_errors=True)
+        except Paused as e:
+            for s in job.steps:
+                if s["status"] in ("running", "failed") and s["note"] in ("", "paused"):
+                    s.update(status="paused", note="paused")
+            job.status, job.reason, job.pause = "paused", e.reason, False
         except Cancelled:
             for s in job.steps:
                 if s["status"] == "running" or s["status"] == "failed" and not s["note"]:
