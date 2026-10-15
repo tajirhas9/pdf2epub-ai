@@ -189,6 +189,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(settings_api.state())
             case ("GET", ["system"]):
                 self._json(settings_api.system())
+            case ("POST", ["system", "paddle"]):
+                self._json(settings_api.install_paddle(self._body()))
+            case ("GET", ["system", "paddle"]):
+                from pdf2epub.paddle_install import INSTALLER
+
+                self._json(INSTALLER.status())
             case ("PUT", ["config"]):
                 self._json(settings_api.save(self._body()))
             case ("POST", ["models"]):
@@ -222,6 +228,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             case ("POST", ["jobs", jid, "resume"]):
                 runner.resume(jid)
+                self._json({"ok": True})
+            case ("POST", ["jobs", jid, "retry-from"]):
+                runner.retry_from(jid, str(self._body().get("step") or ""))
+                self._json({"ok": True})
+            case ("POST", ["jobs", jid, "retry-review"]):
+                runner.retry_review(jid)
                 self._json({"ok": True})
             case ("DELETE", ["jobs", jid]):
                 runner.remove(jid)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from importlib import resources
 from pathlib import Path
@@ -19,6 +20,8 @@ from pdf2epub.pipeline import Context, load_checkpoint, save_checkpoint
 from pdf2epub.resume import PagePartials, Paused, atomic_write_text, read_json
 from pdf2epub.stages.order import mark_continuations
 
+_log = logging.getLogger(__name__)
+FAILURES_FILE = "review-failures.json"  # in book_dir/llm: {"<page no>": "<why the LLM call failed>"}
 SYSTEM = resources.files("pdf2epub.llm.prompts").joinpath("page_review.md").read_text()
 SPREAD_SYSTEM = resources.files("pdf2epub.llm.prompts").joinpath("spread_check.md").read_text()
 GLYPH_SYSTEM = resources.files("pdf2epub.llm.prompts").joinpath("glyph_resolve.md").read_text()
@@ -103,6 +106,26 @@ def page_images(
             crop = crop.resize((round(crop.width * f), round(crop.height * f)), Image.LANCZOS)
         parts.append(ImagePart.from_pil(crop, f"block {b.id}", max_side))
     return parts
+
+
+def review_failures(book_dir: Path) -> dict[int, str]:
+    """Pages (0-based) whose review call failed in the last review, with the reason."""
+    data = read_json(book_dir / "llm" / FAILURES_FILE) or {}
+    return {int(k) - 1: str(v) for k, v in data.items()}
+
+
+def _save_failures(book_dir: Path, failed: dict[int, str], reviewed: set[int] | None) -> None:
+    """Replace the entries of the pages just reviewed (all of them when `reviewed` is None)."""
+    kept = {} if reviewed is None else {i: r for i, r in review_failures(book_dir).items() if i not in reviewed}
+    kept.update(failed)
+    path = book_dir / "llm" / FAILURES_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps({str(i + 1): r for i, r in sorted(kept.items())}, ensure_ascii=False))
+
+
+def _short(reason: str, limit: int = 80) -> str:
+    reason = " ".join(reason.split())
+    return reason if len(reason) <= limit else reason[: limit - 1] + "…"
 
 
 async def review_page(
@@ -218,11 +241,11 @@ async def verify_inserted_marks(
 ) -> list[dict]:
     """Marks the page review added where OCR saw nothing: locate on the scan, match to known marks,
     verify new ones; what can't be located is removed (missing is better than wrong)."""
-    from pdf2epub.engines import PaddleOcr
+    from pdf2epub.engines import make_ocr
     from pdf2epub.ir import PLACEHOLDER
     from pdf2epub.stages.glyphs import GlyphBook, apply_glyphs, placeholder_hits, strip_placeholders
 
-    book = GlyphBook(doc, book_dir, ocr=PaddleOcr(settings.use_gpu, settings.ocr_det_model))
+    book = GlyphBook(doc, book_dir, ocr=make_ocr(settings))
     found = 0
     for page in doc.pages:
         blocks = [b for b in page.blocks if any(PLACEHOLDER in s.text for s in b.spans)]
@@ -369,7 +392,7 @@ async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None
     pending = [p for p in todo if p.index not in restored]
     client = OpenAICompatClient(settings.llm, cache_dir=book_dir / "llm" / "cache")
     sem = asyncio.Semaphore(max(1, settings.llm.concurrency))
-    failures: list[str] = []
+    failed: dict[int, str] = {}  # page index -> why its LLM call failed (not saved: retried on resume)
     done = len(todo) - len(pending)
     t0 = time.perf_counter()
     writer = VuePageWriter(doc, book_dir)
@@ -386,11 +409,15 @@ async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None
         ok = sum(1 for x in log if x["status"] == "applied")
         return ok, len(log) - ok
 
+    def _failed_note() -> str:
+        if not failed:
+            return ""
+        first = min(failed)
+        return f" · {len(failed)} failed (p{first + 1}: {_short(failed[first])})"
+
     def _note() -> str:
         ok, bad = _count([x for x in logs if x["op"].get("op") not in ("spread", "glyph", "glyph-apply")])
-        return (
-            f"{ok} fixes" + (f" · {bad} rejected" if bad else "") + (f" · {len(failures)} failed" if failures else "")
-        )
+        return f"{ok} fixes" + (f" · {bad} rejected" if bad else "") + _failed_note()
 
     halted: list[BaseException] = []  # once the server is gone or a pause is asked, start no more pages
 
@@ -405,15 +432,19 @@ async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None
                 halted.append(e)
                 raise
             t = time.perf_counter()
+            page.flags = [f for f in page.flags if f != "review:failed"]  # a retry starts clean
             try:
                 entries = await review_page(client, page, settings, book_dir, renderer)
             except LLMUnavailable as e:
                 halted.append(e)
                 raise
             except LLMError as e:  # not saved: retried when the review is resumed
-                failures.append(f"p{page.index + 1}: {e}")
-                page.flags.append("review:failed")
+                _log.warning("review p%d failed: %s", page.index + 1, e)
+                failed[page.index] = str(e)
+                if "review:failed" not in page.flags:
+                    page.flags.append("review:failed")
             else:
+                failed.pop(page.index, None)
                 page.timings["review"] = round(time.perf_counter() - t, 2)
                 logs.extend(entries)
                 partials.save(page, entries)
@@ -464,7 +495,7 @@ async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None
             raise
         if rep:
             ok, bad = _count([x for x in logs if x["op"].get("op") not in ("spread", "glyph", "glyph-apply")])
-            rep.done("review", f"{ok} fixes applied" + (f", {bad} rejected by checks" if bad else ""))
+            rep.done("review", f"{ok} fixes applied" + (f", {bad} rejected by checks" if bad else "") + _failed_note())
         before = len(logs)
         step = "inserted_marks"
         logs.extend(await verify_inserted_marks(client, doc, settings, book_dir))
@@ -484,7 +515,7 @@ async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None
     partials.clear()
     (ctx.ir_dir / "review-pre.json").unlink(missing_ok=True)
     writer.write_all()
-    (book_dir / "llm").mkdir(parents=True, exist_ok=True)
+    _save_failures(book_dir, failed, None if pages is None else {p.index for p in todo})
     with (book_dir / "llm" / "ops-log.jsonl").open("a") as f:
         for entry in logs:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -492,6 +523,7 @@ async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None
     rejected = len(logs) - applied
     seconds = time.perf_counter() - t0
     text = f"Reviewed {len(todo)} pages in {seconds:.0f}s: {applied} changes applied, {rejected} rejected by checks"
+    failures = [f"p{i + 1}: {r}" for i, r in sorted(failed.items())]
     if failures:
         text += f"; {len(failures)} pages failed ({failures[0]})"
     return {
@@ -499,6 +531,7 @@ async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None
         "applied": applied,
         "rejected": rejected,
         "failures": failures,
+        "failed_pages": sorted(failed),
         "seconds": seconds,
         "text": text,
     }

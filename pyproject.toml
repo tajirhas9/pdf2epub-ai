@@ -18,6 +18,7 @@ dependencies = [
     "pydantic>=2.14.1",
     "pydantic-settings>=2.15.0",
     "pymupdf>=1.28.2",
+    "pyobjc-framework-Vision>=11; sys_platform == 'darwin'",
     "rich>=15.0.0",
     "tomli-w>=1.2.0",
     "typer>=0.27.3",

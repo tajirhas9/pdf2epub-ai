@@ -1,13 +1,19 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, toRef, watch } from 'vue'
-import { api, formatSize, hostOf, type ConvertOptions, type Job } from './api'
-import JobCard from './JobCard.vue'
+import { computed, onMounted, reactive, ref, toRef, watch } from 'vue'
+import { api, formatSize, hostOf, type ConvertOptions } from './api'
+import { refreshJobs } from './jobs'
 import LangPicker from './LangPicker.vue'
-import { errorText, store, toast } from './store'
+import { errorText, loadSystem, store, toast } from './store'
 import Switch from './Switch.vue'
 
-const emit = defineEmits<{ settings: [] }>()
+const emit = defineEmits<{ settings: []; created: [id: string] }>()
 const st = computed(() => store.state!)
+
+// OCR engine choices: Apple Vision only where macOS provides it; "auto" resolves to the recommended one.
+const engines = computed(() => store.system?.ocr_engines)
+const appleAvailable = computed(() => !!engines.value?.available.includes('apple'))
+const recommendedLabel = computed(() => (engines.value?.recommended === 'apple' ? 'Apple Vision' : 'PaddleOCR'))
+const usesPaddle = (choice: string) => (choice === 'auto' ? engines.value?.recommended !== 'apple' : choice === 'paddle')
 
 // ---- file ----
 const file = toRef(store, 'pending')
@@ -55,6 +61,7 @@ const options = reactive<ConvertOptions>({
   keep_work: v.keep_work,
   use_gpu: v.use_gpu,
   ocr_det_model: v.ocr_det_model,
+  ocr_engine: v.ocr_engine,
   vector_dpi: v.vector_dpi,
 })
 const defaultName = computed(() =>
@@ -94,10 +101,10 @@ async function convert() {
   if (!file.value) return
   submitting.value = true
   try {
-    await api.convert(file.value.id, { ...options, langs: [...options.langs] })
+    const job = await api.convert(file.value.id, { ...options, langs: [...options.langs] })
     file.value = null
-    await refresh()
-    document.getElementById('jobs')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    await refreshJobs()
+    emit('created', job.id)
   } catch (e) {
     toast(errorText(e), 'err')
   } finally {
@@ -105,27 +112,7 @@ async function convert() {
   }
 }
 
-// ---- jobs (poll fast while something runs) ----
-const jobs = ref<Job[]>([])
-let timer: ReturnType<typeof setTimeout> | undefined
-async function refresh() {
-  clearTimeout(timer)
-  try {
-    const before = new Map(jobs.value.map((j) => [j.id, j.status]))
-    jobs.value = await api.jobs()
-    for (const j of jobs.value) {
-      const was = before.get(j.id)
-      if (was && was !== j.status && j.status === 'done') toast(`${j.file.name} is ready`)
-      if (was && was !== j.status && j.status === 'failed') toast(`${j.file.name} failed`, 'err')
-      if (was && was !== j.status && j.status === 'paused' && j.reason.startsWith('llm-unreachable'))
-        toast(`${j.file.name} paused: the AI server stopped answering`, 'err')
-    }
-  } catch { /* server restarting: keep the last view */ }
-  const busy = jobs.value.some((j) => ['queued', 'running', 'pausing', 'cancelling'].includes(j.status))
-  timer = setTimeout(refresh, busy ? 800 : 4000)
-}
-onMounted(refresh)
-onBeforeUnmount(() => clearTimeout(timer))
+onMounted(() => { if (!store.system) loadSystem() }) // OCR engines on this computer
 </script>
 
 <template>
@@ -199,10 +186,18 @@ onBeforeUnmount(() => clearTimeout(timer))
         <details class="more">
           <summary>Advanced</summary>
           <div class="body stack">
-            <Switch v-model="options.use_gpu" label="Use the graphics card (GPU)" hint="Falls back to the CPU when no NVIDIA GPU is available." />
+            <Switch v-model="options.use_gpu" label="Use the graphics card (GPU)" hint="NVIDIA GPUs only; falls back to the CPU. Apple Vision uses the Mac's GPU by itself." />
             <Switch v-model="options.keep_work" label="Keep intermediate files" hint="To inspect pages afterwards with `pdf2epub dev`." />
             <div class="grid-2">
               <div class="field">
+                <label for="c-ocr">Text recognition (OCR)</label>
+                <select id="c-ocr" v-model="options.ocr_engine">
+                  <option value="auto">Automatic — {{ recommendedLabel }}</option>
+                  <option v-if="appleAvailable" value="apple">Apple Vision</option>
+                  <option value="paddle">PaddleOCR</option>
+                </select>
+              </div>
+              <div v-if="usesPaddle(options.ocr_engine)" class="field">
                 <label for="c-det">Text line detector</label>
                 <select id="c-det" v-model="options.ocr_det_model">
                   <option value="auto">Automatic</option>
@@ -225,11 +220,6 @@ onBeforeUnmount(() => clearTimeout(timer))
         </button>
         <span v-if="!file" class="hint">Choose a PDF first.</span>
       </div>
-    </section>
-
-    <section v-if="jobs.length" id="jobs" class="stack" aria-live="polite">
-      <h2>Conversions</h2>
-      <JobCard v-for="j in jobs" :key="j.id" :job="j" @changed="refresh" />
     </section>
   </div>
 </template>
@@ -261,6 +251,5 @@ onBeforeUnmount(() => clearTimeout(timer))
 .ai-more .link-btn { font-size: 0.85rem; }
 .ai-more { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; padding-left: 3rem; }
 .go { display: flex; align-items: center; gap: 1rem; margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line); }
-#jobs { scroll-margin-top: 4.5rem; }
 @media (max-width: 520px) { .ai-more { padding-left: 0; } }
 </style>

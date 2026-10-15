@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { hostOf } from './api'
+import ConversionsView from './ConversionsView.vue'
 import ConvertView from './ConvertView.vue'
+import { isActive, jobs, refreshJobs } from './jobs'
+import JobView from './JobView.vue'
 import { canLeave } from './leave'
 import SettingsView from './SettingsView.vue'
 import SetupWizard from './SetupWizard.vue'
@@ -9,19 +12,35 @@ import { loadState, store } from './store'
 
 const REPO_URL = 'https://github.com/tajirhas9/pdf2epub-ai'
 
-type View = 'convert' | 'settings' | 'setup'
-const fromHash = (): View => (['settings', 'setup'].includes(location.hash.slice(1)) ? (location.hash.slice(1) as View) : 'convert')
-const view = ref<View>(fromHash())
+// Hash routes: (none) convert · #conversions · #conversions/<id> · #settings · #setup
+type View = 'convert' | 'conversions' | 'job' | 'settings' | 'setup'
+function fromHash(): { view: View; id: string } {
+  const [head = '', id = ''] = location.hash.slice(1).split('/')
+  if (head === 'conversions') return id ? { view: 'job', id } : { view: 'conversions', id: '' }
+  return { view: ['settings', 'setup'].includes(head) ? (head as View) : 'convert', id: '' }
+}
+const view = ref<View>(fromHash().view)
+const jobId = ref(fromHash().id)
+const hashOf = (v: View, id: string) => (v === 'convert' ? '' : v === 'job' ? `#conversions/${id}` : `#${v}`)
 
-function go(next: View) {
-  if (next === view.value || !canLeave()) return
+function go(next: View, id = '') {
+  if ((next === view.value && id === jobId.value) || !canLeave()) return
   view.value = next
-  history.replaceState(null, '', next === 'convert' ? location.pathname : `#${next}`)
+  jobId.value = id
+  history.pushState(null, '', hashOf(next, id) || location.pathname)
   window.scrollTo({ top: 0 })
 }
-window.addEventListener('hashchange', () => (view.value = fromHash()))
+function sync() {
+  const r = fromHash()
+  view.value = r.view
+  jobId.value = r.id
+}
+window.addEventListener('popstate', sync)
+window.addEventListener('hashchange', sync)
 
 onMounted(loadState)
+onMounted(refreshJobs) // polls from then on, so status toasts show on every page
+const running = computed(() => jobs.list.filter(isActive).length)
 watch(
   () => store.state?.configured,
   (configured) => configured === false && (view.value = 'setup'),
@@ -47,6 +66,9 @@ const llm = computed(() => {
         </a>
         <nav v-if="store.state && view !== 'setup'" aria-label="Main">
           <button type="button" :aria-current="view === 'convert' ? 'page' : undefined" @click="go('convert')">Convert</button>
+          <button type="button" :aria-current="view === 'conversions' || view === 'job' ? 'page' : undefined" @click="go('conversions')">
+            Conversions<span v-if="running" class="count" :title="`${running} in progress`">{{ running }}</span>
+          </button>
           <button type="button" :aria-current="view === 'settings' ? 'page' : undefined" @click="go('settings')">Settings</button>
         </nav>
         <span class="spacer" />
@@ -65,7 +87,9 @@ const llm = computed(() => {
       <div v-else-if="!store.state" class="row muted"><span class="spinner" /> Loading…</div>
       <SetupWizard v-else-if="view === 'setup'" @done="go('convert')" />
       <SettingsView v-else-if="view === 'settings'" @setup="go('setup')" />
-      <ConvertView v-else @settings="go('settings')" />
+      <ConversionsView v-else-if="view === 'conversions'" @convert="go('convert')" />
+      <JobView v-else-if="view === 'job'" :id="jobId" @back="go('conversions')" @open="(id) => go('job', id)" />
+      <ConvertView v-else @settings="go('settings')" @created="(id) => go('job', id)" />
     </main>
 
     <footer class="credit">
@@ -103,6 +127,10 @@ nav button {
   padding: 0.4rem 0.7rem; border-radius: 7px;
 }
 nav button:hover { color: var(--ink); background: var(--sunken); }
+nav .count {
+  margin-left: 0.35rem; padding: 0 0.4rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+  background: var(--accent-soft); color: var(--accent);
+}
 nav button[aria-current='page'] { color: var(--ink); background: var(--sunken); font-weight: 560; }
 .status {
   font: inherit; font-size: 0.8rem; color: var(--muted); background: none; border: 0; cursor: pointer;

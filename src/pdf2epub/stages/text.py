@@ -93,11 +93,18 @@ class Text:
     def _ocr_lines(self, page: Page, ctx: Context) -> list[Line]:
         img = load_page_array(page, ctx)
         H, W = img.shape[:2]
-        boxes = self.ocr.detect_lines(img)
-        scale = max(1.0, ctx.settings.ocr_min_ppi / page.dpi) if page.dpi else 1.0
-        crops = [_crop(img, b, scale) for b in boxes]
         primary = self.scripts[0]
-        results = self.ocr.recognize(crops, primary)
+        scale = max(1.0, ctx.settings.ocr_min_ppi / page.dpi) if page.dpi else 1.0
+        read_lines = getattr(self.ocr, "read_lines", None)
+        if read_lines is not None:  # engines that detect and read a whole page in one pass
+            found = read_lines(img, primary)
+            boxes = [b for b, _, _ in found]
+            results = [(t, s) for _, t, s in found]
+            crops = [_crop(img, b, scale) for b in boxes]
+        else:
+            boxes = self.ocr.detect_lines(img)
+            crops = [_crop(img, b, scale) for b in boxes]
+            results = self.ocr.recognize(crops, primary)
         best = [(t, s, primary) for t, s in results]
         for script in self.scripts[1:]:
             retry = [i for i, (_, s, _) in enumerate(best) if s < LOW_CONF]

@@ -211,6 +211,9 @@ def test_resume_needs_the_same_file_and_options(tmp_path, fake_convert):
     assert resumable(settings, copy, book) is not None
     with pytest.raises(OptionsChanged):
         resumable(Settings(work_dir=tmp_path / "work", langs=["ar"]), pdf, book)
+    with pytest.raises(OptionsChanged):  # a different OCR engine would mix two engines' text in one book
+        other = "paddle" if settings.ocr_engine != "paddle" else "apple"
+        resumable(Settings(work_dir=tmp_path / "work", workers=1, langs=["en"], ocr_engine=other), pdf, book)
     _pdf(pdf, 6)  # the PDF changed: its old progress doesn't apply
     assert resumable(settings, pdf, book) is None
 
@@ -313,6 +316,53 @@ def test_review_pause_lets_the_current_page_finish(tmp_path, fake_review):
     assert calls == [0, 1, 2, 3]
 
 
+def test_failed_pages_are_recorded_and_retried(tmp_path, fake_review, monkeypatch):
+    from pdf2epub import review as rv
+    from pdf2epub.llm.client import LLMError
+    from pdf2epub.review import review_failures, run_review
+
+    calls, _ = fake_review
+    ok_review = rv.review_page
+    broken = {1, 3}
+
+    async def flaky(client, p, *a, **k):
+        if p.index in broken:
+            raise LLMError("page_review: model did not return JSON")
+        return await ok_review(client, p, *a, **k)
+
+    monkeypatch.setattr(rv, "review_page", flaky)
+    settings = Settings(work_dir=tmp_path / "work")
+    settings.llm.review_policy, settings.llm.concurrency = "all", 1
+    ctx = _ctx(tmp_path)
+    save_checkpoint(_doc(5), ctx, "glyphs")
+    notes = []
+
+    class Rep:
+        def start(self, *a, **k): ...
+        def advance(self, key, done, total=None, note=None):
+            notes.append(note)
+
+        def done(self, key, note=""):
+            notes.append(note)
+
+    summary = asyncio.run(run_review(settings, ctx.book_dir, None, Rep()))
+    assert summary["failed_pages"] == [1, 3]
+    assert review_failures(ctx.book_dir) == {
+        1: "page_review: model did not return JSON",
+        3: "page_review: model did not return JSON",
+    }
+    assert "2 failed (p2: page_review: model did not return JSON)" in notes[-1]
+    doc = load_checkpoint(ctx)
+    assert [i for i, p in enumerate(doc.pages) if "review:failed" in p.flags] == [1, 3]
+
+    broken.discard(1)  # page 2 works now, page 4 still fails
+    summary = asyncio.run(run_review(settings, ctx.book_dir, {1, 3}))
+    assert summary["pages"] == 2 and summary["failed_pages"] == [3]
+    assert review_failures(ctx.book_dir) == {3: "page_review: model did not return JSON"}
+    doc = load_checkpoint(ctx)
+    assert "review:failed" not in doc.pages[1].flags and doc.pages[3].flags.count("review:failed") == 1
+
+
 def test_unreachable_server_is_llm_unavailable():
     s = LLMSettings(base_url="http://127.0.0.1:9/v1", model="m", max_retries=0, timeout_s=3)
 
@@ -391,3 +441,121 @@ def test_web_pause_and_resume(tmp_path, monkeypatch):
     assert runner.list()[0]["status"] == "pausing"
     with pytest.raises(ValueError):
         runner.resume("j1")
+
+
+def test_web_retry_review_of_failed_pages(tmp_path, monkeypatch):
+    from pdf2epub.webui.jobs import JobRunner
+
+    monkeypatch.setattr(JobRunner, "warm_up", lambda self: None)
+    ran = []
+    monkeypatch.setattr(JobRunner, "_retry", lambda self, job: ran.append(("retry", job.id)))
+    monkeypatch.setattr(JobRunner, "_run", lambda self, job: ran.append(("run", job.id)))
+    work, _ = _web_run(tmp_path, "paused", "paused")
+    runner = JobRunner(work / "_uploads")
+    job = runner.jobs["j1"]
+    job.status = "done"
+    job.result = {"review_failed": [], "work_dir": str(work / "book")}
+    with pytest.raises(ValueError):
+        runner.retry_review("j1")  # nothing failed
+    job.result["review_failed"] = [{"page": 2, "reason": "x"}]
+    runner.retry_review("j1")
+    assert job.status == "queued" and job.retrying
+    for _ in range(50):
+        if ran:
+            break
+        time.sleep(0.02)
+    assert ran == [("retry", "j1")]
+    job.status = "paused"  # paused during the retry: Resume continues the retry, not a full conversion
+    runner.resume("j1")
+    for _ in range(50):
+        if len(ran) == 2:
+            break
+        time.sleep(0.02)
+    assert ran[-1] == ("retry", "j1")
+
+
+# ---- retry from a step ---------------------------------------------------------------------------
+
+STAGES = ("a", "b", "c")
+
+
+def _book(tmp_path) -> Path:
+    """A finished, reviewed book: a checkpoint per stage plus the review's files."""
+    book = tmp_path / "book"
+    for name in (*STAGES, "review"):
+        atomic_write_text(book / "ir" / f"{name}.json", "{}")
+    atomic_write_text(book / "ir" / "latest.json", json.dumps({"stage": "review"}))
+    atomic_write_text(book / "ir" / "partial" / "c" / "p0001.json", "{}")
+    for name in ("llm/ops-log.jsonl", "llm/review-failures.json", "llm/cache/x.json", "book.json"):
+        atomic_write_text(book / name, "{}")
+    write_run(book, status="done")
+    return book
+
+
+def test_retry_points_follow_the_files_on_disk(tmp_path):
+    from pdf2epub.resume import retry_points
+
+    book = _book(tmp_path)
+    assert retry_points(book, STAGES, llm=True) == [*STAGES, "codegen", "review", "build", "validate"]
+    assert "review" not in retry_points(book, STAGES, llm=False)
+    (book / "ir" / "a.json").unlink()
+    (book / "book.json").unlink()
+    assert retry_points(book, STAGES, llm=False) == ["a", "c", "codegen"]
+    assert retry_points(tmp_path / "gone", STAGES, llm=True) == []
+
+
+def test_rewind_to_a_stage_keeps_the_stages_before_it(tmp_path):
+    from pdf2epub.resume import latest_stage, rewind
+
+    book = _book(tmp_path)
+    rewind(book, "b", STAGES)
+    assert sorted(f.stem for f in (book / "ir").glob("*.json")) == ["a", "latest"]
+    assert latest_stage(book) == "a"
+    assert not (book / "ir" / "partial").exists()
+    assert not (book / "llm" / "ops-log.jsonl").exists() and not (book / "llm" / "review-failures.json").exists()
+    assert (book / "llm" / "cache" / "x.json").exists()  # free, fast rerun of the review
+    run = read_run(book)
+    assert run["status"] == "paused" and run["redo"] == "b"
+
+
+def test_rewind_to_the_review_or_the_build(tmp_path):
+    from pdf2epub.resume import latest_stage, rewind
+
+    book = _book(tmp_path)
+    rewind(book, "build", STAGES)  # the IR stays; only the EPUB is left to build
+    assert latest_stage(book) == "review" and read_run(book)["status"] == "converted"
+    rewind(book, "review", STAGES)
+    assert latest_stage(book) == "c" and not (book / "ir" / "review.json").exists()
+    rewind(book, "a", STAGES)
+    assert latest_stage(book) is None and not list((book / "ir").glob("*.json"))
+    with pytest.raises(ValueError):  # the input of "b" is gone now
+        rewind(book, "b", STAGES)
+
+
+def test_convert_redoes_from_a_stage(tmp_path, fake_convert, monkeypatch):
+    monkeypatch.setattr(core, "STAGE_NAMES", ("a", "b"))
+    monkeypatch.setattr(core, "RETRY_STEPS", ("a", "b", "codegen", "build"))
+    pdf = _pdf(tmp_path / "Book.pdf")
+    settings = Settings(work_dir=tmp_path / "work", workers=1, langs=["en"])
+    settings.llm.enabled = False
+    core.convert_and_review(settings, pdf)
+    book = settings.book_dir("book")
+    seen = []
+    doc, _ = core.convert_and_review(settings, pdf, None, "b", on_resume=seen.append)
+    a, b = fake_convert
+    assert a.seen == [] and b.seen == [0, 1, 2, 3, 4]
+    assert seen[0]["redo"] == "b" and read_run(book)["status"] == "converted" and not read_run(book)["redo"]
+    assert all({"by:a", "by:b"} <= set(p.flags) for p in doc.pages)
+    with pytest.raises(ValueError):
+        core.convert_and_review(settings, pdf, None, "nope")
+
+
+def test_resume_true_never_starts_over(tmp_path, fake_convert):
+    pdf = _pdf(tmp_path / "Book.pdf")
+    settings = Settings(work_dir=tmp_path / "work", workers=1, langs=["en"])
+    settings.llm.enabled = False
+    book = settings.book_dir("book")
+    atomic_write_text(book / "keep.txt", "x")
+    with pytest.raises(ValueError):
+        core.convert_and_review(settings, pdf, resume=True)
+    assert (book / "keep.txt").exists()

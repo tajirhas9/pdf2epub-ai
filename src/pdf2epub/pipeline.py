@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import signal
 import time
 from collections.abc import Callable
@@ -44,7 +43,9 @@ class Context:
         return [p for p in doc.pages if self.pages is None or p.index in self.pages]
 
     def workers(self) -> int:
-        return self.settings.workers or os.cpu_count() or 4
+        from pdf2epub.hardware import auto_workers
+
+        return self.settings.workers or auto_workers()
 
     def check_pause(self) -> None:
         if self.pause_requested():

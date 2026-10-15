@@ -16,10 +16,15 @@ from pdf2epub.ingest import book_id_for, open_document
 from pdf2epub.ir import Document
 from pdf2epub.pipeline import Context, Pipeline, load_checkpoint
 
+# build_pipeline's stages, in order (named here so callers needn't load the vision models)
+STAGE_NAMES = ("rasterize", "layout", "text", "running", "figures", "spreads", "order", "glyphs")
+# steps a book can be redone from: a stage, the page code, the LLM review, or the EPUB build
+RETRY_STEPS = (*STAGE_NAMES, "codegen", "review", "build", "validate")
+
 
 def build_pipeline(settings: Settings) -> Pipeline:
     # Imported here so `pdf2epub --help` doesn't pay for loading vision libraries.
-    from pdf2epub.engines import PaddleLayout, PaddleOcr
+    from pdf2epub.engines import PaddleLayout, make_ocr
     from pdf2epub.stages.figures import Figures
     from pdf2epub.stages.glyphs import Glyphs
     from pdf2epub.stages.layout import Layout
@@ -29,8 +34,8 @@ def build_pipeline(settings: Settings) -> Pipeline:
     from pdf2epub.stages.spreads import Spreads
     from pdf2epub.stages.text import Text
 
-    ocr = PaddleOcr(settings.use_gpu, settings.ocr_det_model)
-    return Pipeline(
+    ocr = make_ocr(settings)
+    pipeline = Pipeline(
         [
             Rasterize(),
             Layout(PaddleLayout(settings.use_gpu)),
@@ -42,6 +47,8 @@ def build_pipeline(settings: Settings) -> Pipeline:
             Glyphs(ocr),
         ]
     )
+    assert tuple(pipeline.names()) == STAGE_NAMES
+    return pipeline
 
 
 def make_context(
@@ -69,15 +76,18 @@ def preload_models(settings: Settings, reporter=None) -> None:
     if reporter is not None:
         first = not (settings.cache_dir / "paddlex" / "official_models" / "PP-DocLayout_plus-L").exists()
         reporter.start("models", note="first run: downloading ~250 MB, one time" if first else "")
-    preload(settings.use_gpu, settings.ocr_scripts()[0], settings.ocr_det_model)
+    preload(settings.use_gpu, settings.ocr_scripts()[0], settings.ocr_det_model, settings.ocr_engine)
     if reporter is not None:
         reporter.done("models", _device_note(settings))
 
 
 def _device_note(settings: Settings) -> str:
-    from pdf2epub.engines import _device
+    from pdf2epub.engines import _device, ocr_engine_label, resolve_ocr_engine
 
-    return "GPU" if _device(settings.use_gpu).startswith("gpu") else "CPU"
+    layout = "CPU" if _device(settings.use_gpu) == "cpu" else "GPU"
+    if resolve_ocr_engine(settings.ocr_engine) == "apple":
+        return f"layout {layout} · text {ocr_engine_label(settings.ocr_engine)}"
+    return layout
 
 
 def convert(
@@ -196,17 +206,41 @@ def convert_and_review(
     """convert, then the LLM review when enabled (the CLI's `convert`/`run` and the web UI share this).
 
     A whole-book run continues an unfinished earlier run of the same file (resume=None: automatic;
-    False: start over). Pause/stop/unreachable LLM -> pdf2epub.resume.Paused, progress kept."""
+    False: start over; True: continue or fail). With `from_stage` (and no `pages`) the saved progress
+    is rewound to just before that step (any of RETRY_STEPS), which reruns it and every step after.
+    Pause/stop/unreachable LLM -> pdf2epub.resume.Paused, progress kept."""
     from pdf2epub.llm.client import LLMUnavailable
-    from pdf2epub.resume import Paused, fingerprint, latest_stage, reset, resumable, run_options, write_run
+    from pdf2epub.resume import (
+        Paused,
+        fingerprint,
+        latest_stage,
+        read_run,
+        reset,
+        resumable,
+        rewind,
+        run_options,
+        write_run,
+    )
 
     source = source.resolve()
     book_dir = settings.book_dir(book_id_for(source))
+    if from_stage and pages is None:
+        if from_stage not in RETRY_STEPS:
+            raise ValueError(f"unknown step {from_stage!r}; pick one of: {', '.join(RETRY_STEPS)}")
+        saved = (read_run(book_dir) or {}).get("fingerprint")
+        if saved is not None and saved != fingerprint(source):
+            raise ValueError("the PDF changed since it was converted; convert it again with --restart")
+        rewind(book_dir, from_stage, STAGE_NAMES)
+        # the options picked now apply to the steps about to rerun
+        write_run(book_dir, source=str(source), fingerprint=fingerprint(source), options=run_options(settings))
+        from_stage, resume = None, True
     whole = pages is None and from_stage is None
     run = None
     if whole:
         if resume is not False:
             run = resumable(settings, source, book_dir)  # raises OptionsChanged
+        if run is None and resume:  # never wipe the progress a caller asked to continue
+            raise ValueError("no saved progress to continue for this book; convert it again")
         if run is None:  # starting over: progress of an earlier run would be mixed in
             reset(book_dir)
         if run and on_resume:
@@ -219,6 +253,7 @@ def convert_and_review(
             options=run_options(settings),
             status="running",
             reason="",
+            redo="",
             web=web if web is not None else (run or {}).get("web"),
         )
         reporter = RunTracker(reporter, book_dir)
@@ -253,6 +288,7 @@ def latest_doc(settings: Settings, book_dir: Path) -> Document | None:
 def explain_error(exc: BaseException) -> tuple[str, str]:
     """(message, hint) for errors users can act on."""
     from pdf2epub.llm.client import LLMError
+    from pdf2epub.paddle_install import InstallError
     from pdf2epub.resume import OptionsChanged, Paused
     from pdf2epub.runtime import RuntimeMissing
 
@@ -269,15 +305,17 @@ def explain_error(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, subprocess.CalledProcessError):
         cmd = " ".join(map(str, exc.cmd[:3])) if isinstance(exc.cmd, list | tuple) else str(exc.cmd)
         return f"`{cmd}` failed (exit {exc.returncode})", "Run with -v for details."
+    if isinstance(exc, InstallError):
+        return str(exc), "Pick a build yourself: `pdf2epub install-paddle --cpu` (or --gpu)."
     if isinstance(exc, RuntimeError) and "PaddlePaddle is not installed" in str(exc):
-        return str(exc), ""
+        return str(exc), "Or start `pdf2epub ui`: it installs it for you."
     return f"{type(exc).__name__}: {exc}", "Run with -v for the full traceback."
 
 
 def pause_text(reason: str) -> str:
     if reason.startswith("llm-unreachable"):
         detail = reason.partition(":")[2].strip()
-        return "Paused: the AI server stopped answering" + (f" ({detail})" if detail else "")
+        return "Paused: the AI review stopped" + (f" ({detail})" if detail else "")
     return "Paused" if reason in ("", "paused") else f"Paused ({reason})"
 
 

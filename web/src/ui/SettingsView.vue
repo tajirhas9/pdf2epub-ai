@@ -15,6 +15,12 @@ const st = computed(() => store.state!)
 const pinned = (key: string) => st.value.env_overrides.includes(key)
 onBeforeRouteLeaveLike(() => d.dirty.value)
 
+// OCR engine choices: Apple Vision only where macOS provides it; "auto" resolves to the recommended one.
+const engines = computed(() => store.system?.ocr_engines)
+const appleAvailable = computed(() => !!engines.value?.available.includes('apple'))
+const recommendedLabel = computed(() => (engines.value?.recommended === 'apple' ? 'Apple Vision' : 'PaddleOCR'))
+const usesPaddle = (choice: string) => (choice === 'auto' ? engines.value?.recommended !== 'apple' : choice === 'paddle')
+
 async function save() {
   try {
     await d.save()
@@ -121,9 +127,17 @@ async function save() {
         <details class="more">
           <summary>Advanced conversion options</summary>
           <div class="body stack">
-            <Switch v-model="v.use_gpu" label="Use the graphics card (GPU)" hint="Falls back to the CPU automatically when no NVIDIA GPU is available." />
+            <Switch v-model="v.use_gpu" label="Use the graphics card (GPU)" hint="NVIDIA GPUs only; falls back to the CPU automatically. Apple Vision uses the Mac's GPU by itself." />
             <div class="grid-2">
               <div class="field">
+                <label for="s-ocr">Text recognition (OCR)</label>
+                <select id="s-ocr" v-model="v.ocr_engine">
+                  <option value="auto">Automatic — {{ recommendedLabel }}</option>
+                  <option v-if="appleAvailable" value="apple">Apple Vision</option>
+                  <option value="paddle">PaddleOCR</option>
+                </select>
+              </div>
+              <div v-if="usesPaddle(v.ocr_engine)" class="field">
                 <label for="s-det">Text line detector</label>
                 <select id="s-det" v-model="v.ocr_det_model">
                   <option value="auto">Automatic (recommended)</option>
