@@ -34,6 +34,7 @@ function pickProvider(e: Event) {
   providerId.value = id
   const p = presets.value.find((x) => x.id === id)
   if (p?.base_url) baseUrl.value = p.base_url
+  if (p?.default_model && !model.value) model.value = p.default_model
   check.value = null
 }
 

@@ -17,6 +17,7 @@ class Provider:
     base_url: str
     needs_key: bool
     hint: str = ""
+    default_model: str = ""
 
 
 PROVIDERS: dict[str, Provider] = {
@@ -26,9 +27,34 @@ PROVIDERS: dict[str, Provider] = {
     "openai": Provider("OpenAI", "https://api.openai.com/v1", True),
     "gemini": Provider("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai/", True),
     "openrouter": Provider("OpenRouter", "https://openrouter.ai/api/v1", True, "many vision models, one key"),
+    "deepseek": Provider(
+        "DeepSeek", "https://api.deepseek.com", True, "vision model: deepseek-flash", default_model="deepseek-flash"
+    ),
     "custom": Provider("Other OpenAI-compatible endpoint", "", False),
     "none": Provider("No LLM (deterministic conversion only)", "", False),
 }
+
+
+def _choose_ocr_engine(console: Console, data: dict, yes: bool) -> None:
+    """On a Mac, text recognition is best done by Apple Vision: pick it, offer PaddleOCR instead."""
+    from pdf2epub.engines import apple_vision_available, ocr_engine_label
+
+    if not apple_vision_available():
+        return  # PaddleOCR is the only engine here ("auto" already means it)
+    current = data.get("ocr_engine", "apple")
+    if current == "auto":
+        current = "apple"
+    if yes:
+        engine = current
+    else:
+        best = ocr_engine_label("apple")
+        console.print(f"[bold]OCR engine[/]: {best} is best for this Mac (PaddleOCR is CPU-only here)")
+        engine = typer.prompt("Text recognition engine [apple/paddle]", default=current)
+        if engine not in ("apple", "paddle"):
+            raise typer.BadParameter("OCR engine: apple or paddle")
+    data["ocr_engine"] = engine
+    label = ocr_engine_label("apple") if engine == "apple" else "PaddleOCR"
+    console.print(f"OCR engine: {label}  [dim](change: pdf2epub config set ocr_engine apple|paddle)[/]")
 
 
 def run_wizard(
@@ -92,10 +118,12 @@ def run_wizard(
                 )
                 for m in shown:
                     console.print(f"  {m}")
-            default = models[0] if len(models) == 1 else llm.get("model", "")
+            default = models[0] if len(models) == 1 else llm.get("model") or p.default_model
             model = typer.prompt(
                 "Model (needs image input; blank = server default)", default=default, show_default=bool(default)
             )
+        if model is None and p.default_model and not llm.get("model"):
+            model = p.default_model
         if model is not None:
             if model:
                 llm["model"] = model
@@ -118,6 +146,7 @@ def run_wizard(
             data.pop("out_dir", None)
     if not data.get("langs"):
         data.pop("langs", None)
+    _choose_ocr_engine(console, data, yes)
     path = config_store.write(data)
     console.print(f"[green]saved[/] {path}")
     return data

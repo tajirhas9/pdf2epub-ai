@@ -21,7 +21,7 @@ from pdf2epub.ir import Page
 
 RUN_FILE = "run.json"
 # Options a resumed run must share with the run that saved the progress.
-RUN_OPTIONS = ("langs", "use_gpu", "ocr_det_model", "vector_dpi")
+RUN_OPTIONS = ("langs", "use_gpu", "ocr_det_model", "ocr_engine", "vector_dpi")
 LLM_OPTIONS = ("enabled", "review_policy")
 # running = stopped without notice (crash, power cut); converted = only the EPUB build is left
 RESUMABLE = ("running", "paused", "converted")
@@ -160,6 +160,8 @@ def describe(run: dict) -> str:
     """'stopped during LLM: review pages (143/400 pages done)' for the resume line."""
     from pdf2epub.ui import label
 
+    if run.get("redo"):
+        return f"redoing from {label(run['redo']).lower()}, keeping the steps before it"
     if run.get("status") == "converted":
         return "already converted, only the EPUB is left to build (--restart converts it again)"
     phase = run.get("phase") or ""
@@ -173,6 +175,53 @@ def describe(run: dict) -> str:
 
 def latest_stage(book_dir: Path) -> str | None:
     return (read_json(book_dir / "ir" / "latest.json") or {}).get("stage")
+
+
+AFTER_STAGES = ("codegen", "review")  # run on the last stage's output (codegen reruns with the review)
+BUILD_STEPS = ("build", "validate")
+REVIEW_FILES = ("llm/ops-log.jsonl", "llm/review-failures.json")  # rewritten by the review
+
+
+def _ready(book_dir: Path, step: str, stages: tuple[str, ...] | list[str]) -> bool:
+    """Whether the input of `step` is still on disk, so the run can redo it and everything after."""
+    ir = book_dir / "ir"
+    if step in stages:
+        i = list(stages).index(step)
+        return book_dir.is_dir() if i == 0 else (ir / f"{stages[i - 1]}.json").is_file()
+    if step in AFTER_STAGES:
+        return (ir / f"{stages[-1]}.json").is_file()
+    if step in BUILD_STEPS:
+        return (book_dir / "book.json").is_file() and latest_stage(book_dir) in (stages[-1], "review")
+    return False
+
+
+def retry_points(book_dir: Path, stages: tuple[str, ...] | list[str], llm: bool) -> list[str]:
+    """Steps a run of this book can be redone from (that step and every step after it)."""
+    steps = [*stages, *AFTER_STAGES, *BUILD_STEPS]
+    return [s for s in steps if (llm or s != "review") and _ready(book_dir, s, stages)]
+
+
+def rewind(book_dir: Path, step: str, stages: tuple[str, ...] | list[str]) -> None:
+    """Make the saved progress look like a run paused just before `step`: resuming then redoes `step`
+    and everything after it, and keeps the work of the steps before it (and the LLM reply cache)."""
+    if not _ready(book_dir, step, stages):
+        raise ValueError(f"can't redo from {step!r}: the output of the step before it is gone")
+    ir = book_dir / "ir"
+    if step in BUILD_STEPS:
+        write_run(book_dir, status="converted", reason="", redo=step)
+        return
+    keep = list(stages)[: list(stages).index(step)] if step in stages else list(stages)
+    for f in ir.glob("*.json"):
+        if f.stem not in keep and f.name != "latest.json":
+            f.unlink(missing_ok=True)
+    if keep:
+        atomic_write_text(ir / "latest.json", json.dumps({"stage": keep[-1]}))
+    else:
+        (ir / "latest.json").unlink(missing_ok=True)
+    clear_partials(ir)
+    for name in REVIEW_FILES:
+        (book_dir / name).unlink(missing_ok=True)
+    write_run(book_dir, status="paused", reason="", phase=step, done=0, total=None, redo=step)
 
 
 def reset(book_dir: Path) -> None:

@@ -29,6 +29,7 @@ EDITABLE = (
     "keep_work",
     "use_gpu",
     "ocr_det_model",
+    "ocr_engine",
     "vector_dpi",
 )
 
@@ -99,7 +100,14 @@ def state() -> dict:
         "keyring": _keyring_available(),
         "env_overrides": env_overrides(),
         "providers": [
-            {"id": k, "label": p.label, "base_url": p.base_url, "needs_key": p.needs_key, "hint": p.hint}
+            {
+                "id": k,
+                "label": p.label,
+                "base_url": p.base_url,
+                "needs_key": p.needs_key,
+                "hint": p.hint,
+                "default_model": p.default_model,
+            }
             for k, p in PROVIDERS.items()
         ],
         "languages": [{"code": c, "name": LANGUAGE_NAMES.get(c, c)} for c in codes],
@@ -195,7 +203,34 @@ def _device() -> dict:
         return {"paddle": False, "gpu": False}
     from pdf2epub.engines import _device as device
 
-    return {"paddle": True, "gpu": device(True).startswith("gpu")}
+    return {"paddle": True, "gpu": device(True) != "cpu"}
+
+
+def _paddle() -> dict:
+    """Installed build, the best build for this computer and why, and any install in progress."""
+    from pdf2epub import paddle_install as pi
+    from pdf2epub.hardware import probe
+
+    hw = probe()
+    choice = pi.choose(hw)
+    current = pi.installed()
+    best = choice.build
+    return {
+        "hardware": {
+            "os": hw.os,
+            "arch": hw.arch,
+            "cpus": hw.cpu_count,
+            "ram_gb": round(hw.ram_mb / 1024),
+            "gpus": [g.name for g in hw.gpus],
+        },
+        "paddle_installed": {"package": current[0], "version": current[1]} if current else None,
+        "paddle_choice": choice.public(),
+        # A GPU build fits but the CPU one is installed (e.g. installed before the driver was set up).
+        "paddle_upgrade": bool(best and best.gpu and current and current[0] != best.package),
+        "paddle_install": pi.INSTALLER.status(),
+        "paddle_manual": pi.manual_command(best) if pi.pip_command() is None else "",
+        "paddle_auto": pi.auto_install_enabled(),
+    }
 
 
 def system() -> dict:
@@ -214,4 +249,33 @@ def system() -> dict:
         "java": shutil.which("java") is not None,
         "models": models,
         **_device(),
+        **_paddle(),
+        "ocr_engines": ocr_engines(),
     }
+
+
+def ocr_engines() -> dict:
+    """Text recognition engines on this computer, the recommended one and why (setup + settings)."""
+    from pdf2epub.engines import apple_vision_available, ocr_engine_label
+    from pdf2epub.hardware import probe
+
+    if not apple_vision_available():
+        return {"available": ["paddle"], "recommended": "paddle", "reason": "PaddleOCR"}
+    chip = "Apple silicon: runs on the Neural Engine" if probe().arch == "arm64" else "built into macOS"
+    return {
+        "available": ["apple", "paddle"],
+        "recommended": "apple",
+        "label": ocr_engine_label("apple"),
+        "reason": f"Apple Vision — {chip}, no download; PaddleOCR has no Mac GPU support",
+    }
+
+
+def install_paddle(body: dict) -> dict:
+    from pdf2epub.paddle_install import INSTALLER
+
+    want = body.get("want", "auto")
+    if want not in ("auto", "gpu", "cpu"):
+        raise ValueError("want: auto | gpu | cpu")
+    status = INSTALLER.start(want)
+    _device.cache_clear()
+    return status

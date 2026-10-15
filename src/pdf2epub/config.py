@@ -17,6 +17,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import (
@@ -86,7 +87,7 @@ def _toml_sources(settings_cls, table: str | None = None) -> tuple[PydanticBaseS
 
 
 class LLMSettings(BaseSettings):
-    """Any OpenAI-compatible endpoint: OpenAI, Gemini, OpenRouter, Ollama, LM Studio, llama.cpp…"""
+    """Any OpenAI-compatible endpoint: OpenAI, Gemini, OpenRouter, DeepSeek, Ollama, LM Studio, llama.cpp…"""
 
     model_config = SettingsConfigDict(env_prefix="LLM_", env_file=_dotenv(), extra="ignore")
 
@@ -154,7 +155,7 @@ class Settings(BaseSettings):
 
     vector_dpi: int = 200  # render DPI for vector pages (layout + preview)
     ocr_min_ppi: int = 220  # upscale OCR crops when the scan is below this
-    workers: int = 0  # 0 = os.cpu_count()
+    workers: int = 0  # 0 = one per CPU core, capped by RAM (hardware.auto_workers)
     # Language hints, e.g. ["en", "ar"]. Empty = auto: every fallback script may be tried.
     # With hints, only the hinted scripts are tried (faster: fewer OCR models to load).
     langs: list[str] = Field(default_factory=list)
@@ -164,6 +165,9 @@ class Settings(BaseSettings):
     # Text-line detector: "auto" = server model on GPU, mobile model on CPU (same lines, ~16x faster);
     # or a PaddleOCR model name, e.g. "PP-OCRv5_server_det".
     ocr_det_model: str = "auto"
+    # Text recognition: "auto" = Apple Vision on macOS (Neural Engine / GPU; Paddle is CPU-only there),
+    # PaddleOCR elsewhere; or "apple" / "paddle". Page layout always uses Paddle.
+    ocr_engine: Literal["auto", "apple", "paddle"] = "auto"
 
     # Text-layer quality (0..1) below which OCR is run for the page.
     text_layer_min_quality: float = 0.85

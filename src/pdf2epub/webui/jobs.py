@@ -16,16 +16,36 @@ import shutil
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pdf2epub.app import STAGE_NAMES
 from pdf2epub.config import Settings
+from pdf2epub.resume import BUILD_STEPS
 from pdf2epub.ui import label
 
 log = logging.getLogger(__name__)
 
 REVIEW_POLICIES = ("flagged", "all")
+PIPELINE_STEPS = STAGE_NAMES  # shown as pending before they run
+
+
+def planned_steps(settings: Settings) -> list[str]:
+    """Steps every conversion runs, shown as pending up front. Occasional ones appear when they start."""
+    llm = settings.llm.enabled
+    return [
+        *(["llm_connect"] if llm else []),
+        "models",
+        *PIPELINE_STEPS,
+        "codegen",
+        *(["review"] if llm else []),
+        *BUILD_STEPS,
+    ]
+
+
+RETRYABLE = ("paused", "done", "failed", "cancelled")  # job states "Retry from here" is offered in
 
 
 class Cancelled(Exception):
@@ -59,6 +79,21 @@ class Job:
     cancel: bool = False
     pause: bool = False
     reason: str = ""  # why it is paused: "paused" | "interrupted" | "llm-unreachable: …"
+    retrying: bool = False  # re-reviewing the pages whose LLM call failed (Resume continues that)
+
+    def book_dir(self, settings: Settings | None = None) -> Path:
+        from pdf2epub.ingest import book_id_for
+
+        return (settings or job_settings(self.options)).book_dir(book_id_for(self.upload.path))
+
+    def retry_steps(self) -> list[str]:
+        """Steps this job can be redone from: its work folder still holds their input."""
+        from pdf2epub.resume import retry_points
+
+        if self.status not in RETRYABLE or not self.upload.path.is_file():
+            return []
+        settings = job_settings(self.options)
+        return retry_points(self.book_dir(settings), STAGE_NAMES, settings.llm.enabled)
 
     def public(self, waiting: str | None = None) -> dict:
         end = self.finished or time.time()
@@ -79,6 +114,7 @@ class Job:
             "result": self.result,
             "error": self.error,
             "waiting": waiting if self.status == "queued" else None,  # what the queue is busy with
+            "retry_steps": self.retry_steps(),
         }
 
 
@@ -95,26 +131,29 @@ class JobReporter:
         if self.job.cancel:
             raise Cancelled()
 
+    def seed(self, keys: list[str]) -> None:
+        """List the steps to come as pending (a resumed job keeps the steps it already has)."""
+        if not self.job.steps:
+            self.job.steps.extend(_new_step(k, "pending") for k in keys)
+
     def _step(self, key: str) -> dict:
-        for s in self.job.steps:
+        steps = self.job.steps
+        for s in steps:
             if s["key"] == key:
                 return s
-        s = {
-            "key": key,
-            "label": label(key),
-            "status": "running",
-            "done": 0,
-            "total": None,
-            "note": "",
-            "t0": time.time(),
-        }
-        self.job.steps.append(s)
+        s = _new_step(key, "running")
+        # an occasional step goes before the ones still to come
+        at = next((i for i, x in enumerate(steps) if x["status"] == "pending"), len(steps))
+        steps.insert(at, s)
         return s
 
     def start(self, key, total=None, note=""):
         self._check()
         s = self._step(key)
         s.update(status="running", done=0, total=total, note=note, t0=time.time(), seconds=None)
+        for x in self.job.steps[: self.job.steps.index(s)]:
+            if x["status"] == "pending":  # not needed this time (e.g. already done before a restart)
+                x["status"] = "skipped"
 
     def advance(self, key, done, total=None, note=None):
         s = self._step(key)
@@ -138,6 +177,19 @@ class JobReporter:
     def stop(self): ...
 
 
+def _new_step(key: str, status: str) -> dict:
+    return {
+        "key": key,
+        "label": label(key),
+        "status": status,
+        "done": 0,
+        "total": None,
+        "note": "",
+        "t0": time.time(),
+        "seconds": None,
+    }
+
+
 def safe_name(name: str) -> str:
     stem = re.sub(r"[^\w.\- ]+", "", Path(name).stem).strip() or "book"
     return stem[:120] + ".pdf"
@@ -148,7 +200,7 @@ def job_settings(options: dict) -> Settings:
     overrides: dict[str, Any] = {"keep_work": bool(options.get("keep_work"))}
     if options.get("langs"):
         overrides["langs"] = [str(x).strip() for x in options["langs"] if str(x).strip()]
-    for key in ("use_gpu", "ocr_det_model", "vector_dpi"):
+    for key in ("use_gpu", "ocr_det_model", "ocr_engine", "vector_dpi"):
         if options.get(key) is not None:
             overrides[key] = options[key]
     settings = Settings(**overrides)
@@ -249,6 +301,10 @@ class JobRunner:
     # ---- jobs ----
 
     def submit(self, upload_id: str, options: dict) -> Job:
+        from pdf2epub.paddle_install import INSTALLER
+
+        if INSTALLER.running:
+            raise ValueError("PaddlePaddle (the OCR engine) is still installing — try again in a minute")
         up = self.uploads.get(upload_id)
         if up is None:
             raise KeyError("upload not found; add the file again")
@@ -280,6 +336,37 @@ class JobRunner:
             raise ValueError("this conversion is not paused")
         job.pause, job.cancel, job.reason = False, False, ""
         job.status, job.finished, job.error = "queued", None, None
+        self._queue.put(("retry" if job.retrying else "job", job))
+
+    def retry_review(self, job_id: str) -> None:
+        """Review again the pages whose LLM call failed, then rebuild the EPUB."""
+        job = self.jobs[job_id]
+        if job.status != "done" or not (job.result or {}).get("review_failed"):
+            raise ValueError("this conversion has no failed review pages to retry")
+        if not Path((job.result or {}).get("work_dir") or "").is_dir():
+            raise ValueError("the work folder of this conversion is gone; convert the file again")
+        job.status, job.finished, job.error, job.cancel, job.pause = "queued", None, None, False, False
+        job.retrying = True
+        self._queue.put(("retry", job))
+
+    def retry_from(self, job_id: str, step: str) -> None:
+        """Redo `step` and every step after it (after a fix), keeping the work of the steps before it."""
+        from pdf2epub.resume import rewind
+
+        job = self.jobs[job_id]
+        if job.status not in RETRYABLE:
+            raise ValueError("stop or pause the conversion first")
+        if step not in job.retry_steps():
+            raise ValueError(f"can't redo from {label(step)!r}: its input is gone; convert the file again")
+        rewind(job.book_dir(), step, STAGE_NAMES)
+        keys = [s["key"] for s in job.steps]
+        at = keys.index(step) if step in keys else len(keys)
+        planned = planned_steps(job_settings(job.options))
+        later = planned[planned.index(step) :] if step in planned else []
+        job.steps[at:] = [_new_step(k, "pending") for k in later]  # occasional steps reappear as they run
+        self.uploads.setdefault(job.upload.id, job.upload)
+        job.status, job.reason, job.finished, job.result, job.error = "queued", "", None, None, None
+        job.pause, job.cancel, job.retrying = False, False, False
         self._queue.put(("job", job))
 
     def remove(self, job_id: str) -> None:
@@ -312,6 +399,8 @@ class JobRunner:
             try:
                 if kind == "warm":
                     self._preload()
+                elif kind == "retry":
+                    self._retry(job)
                 else:
                     self._run(job)
             except Exception:  # noqa: BLE001 - the worker must survive anything
@@ -319,7 +408,7 @@ class JobRunner:
 
     def _preload(self) -> None:
         settings = Settings()
-        key = (settings.use_gpu, settings.ocr_scripts()[0], settings.ocr_det_model)
+        key = (settings.use_gpu, settings.ocr_scripts()[0], settings.ocr_det_model, settings.ocr_engine)
         if key in self._warm:
             return
         first = not (settings.cache_dir / "paddlex" / "official_models" / "PP-DocLayout_plus-L").exists()
@@ -336,20 +425,9 @@ class JobRunner:
 
     def _run(self, job: Job) -> None:
         from pdf2epub import app as core
-        from pdf2epub.app import epub_chapters, explain_error, latest_doc
-        from pdf2epub.cleanup import cleanup_after_build
-        from pdf2epub.resume import OptionsChanged, Paused
-        from pdf2epub.ui import attention_items
+        from pdf2epub.resume import OptionsChanged
 
-        if job.cancel:
-            job.status, job.finished = "cancelled", time.time()
-            return
-        if job.status != "queued":  # paused while waiting (and maybe queued again by Resume)
-            return
-        job.status, job.started = "running", time.time()
-        rep = JobReporter(job)
-        try:
-            settings = job_settings(job.options)
+        def work(rep: JobReporter, settings: Settings) -> Path:
             web = {
                 "job_id": job.id,
                 "name": job.upload.name,
@@ -364,10 +442,52 @@ class JobRunner:
                 _, ctx = convert(settings, job.upload.path, None, None, rep, None, rep.pause_requested, web)
             except OptionsChanged:  # new options for a book with unfinished progress: start over
                 job.steps.clear()
+                rep.seed(planned_steps(settings))
                 _, ctx = convert(settings, job.upload.path, None, None, rep, False, rep.pause_requested, web)
-            res = core.build(settings, ctx.book_dir, output_path(settings, job.options, job.upload), reporter=rep)
-            doc = latest_doc(settings, ctx.book_dir)
-            removed = cleanup_after_build(ctx.book_dir, res.valid is not False, settings.keep_work)
+            return ctx.book_dir
+
+        self._execute(job, work)
+
+    def _retry(self, job: Job) -> None:
+        from pdf2epub import app as core
+
+        book_dir = Path(job.result["work_dir"])
+        pages = {int(f["page"]) - 1 for f in job.result["review_failed"]}
+
+        def work(rep: JobReporter, settings: Settings) -> Path:
+            for s in job.steps:  # the review and everything after it run again
+                if s["key"] in ("review", "inserted_marks") or s["key"] in BUILD_STEPS:
+                    s.update(_new_step(s["key"], "pending"))
+            core.review(settings, book_dir, pages, rep, rep.pause_requested)
+            return book_dir
+
+        self._execute(job, work)
+
+    def _execute(self, job: Job, work: Callable[[JobReporter, Settings], Path]) -> None:
+        """Run `work` (convert/review; returns the book dir), then build the EPUB and record the result."""
+        from pdf2epub import app as core
+        from pdf2epub.app import epub_chapters, explain_error, latest_doc
+        from pdf2epub.cleanup import cleanup_after_build
+        from pdf2epub.resume import Paused
+        from pdf2epub.review import review_failures
+        from pdf2epub.ui import attention_items
+
+        if job.cancel:
+            job.status, job.finished = "cancelled", time.time()
+            return
+        if job.status != "queued":  # paused while waiting (and maybe queued again by Resume)
+            return
+        job.status, job.started = "running", time.time()
+        rep = JobReporter(job)
+        try:
+            settings = job_settings(job.options)
+            rep.seed(planned_steps(settings))
+            book_dir = work(rep, settings)
+            res = core.build(settings, book_dir, output_path(settings, job.options, job.upload), reporter=rep)
+            doc = latest_doc(settings, book_dir)
+            failed = review_failures(book_dir) if settings.llm.enabled else {}
+            # failed review pages: keep the work dir so they can be retried
+            removed = cleanup_after_build(book_dir, res.valid is not False and not failed, settings.keep_work)
             job.result = {
                 "file": res.epub.name,
                 "path": str(res.epub),
@@ -376,11 +496,15 @@ class JobRunner:
                 "chapters": epub_chapters(res.epub),
                 "pages": len(doc.pages) if doc else job.upload.pages,
                 "attention": attention_items(doc) if doc else [],
-                "work_dir": None if removed else str(ctx.book_dir),
+                "review_failed": [{"page": i + 1, "reason": r} for i, r in sorted(failed.items())],
+                "work_dir": None if removed else str(book_dir),
                 "epubcheck": res.epubcheck_output[-3000:] if res.valid is False else "",
                 "note": res.epubcheck_output if res.valid is None else "",
             }
-            job.status = "done"
+            for s in job.steps:
+                if s["status"] == "pending":
+                    s["status"] = "skipped"
+            job.status, job.retrying = "done", False
             if removed:  # the PDF copy is only needed to resume a failed conversion
                 self.uploads.pop(job.upload.id, None)
                 shutil.rmtree(job.upload.path.parent, ignore_errors=True)

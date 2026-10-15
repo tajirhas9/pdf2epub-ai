@@ -56,20 +56,26 @@ v22.12 or newer).
 
 ### Step 2 — install pdf2epub
 
-Pick **one** line: CPU works everywhere; GPU needs an NVIDIA card (Paddle's CUDA builds come from
-Paddle's own package index, hence the extra flags).
-
 ```bash
-# CPU
-uv tool install --python 3.11 "pdf2epub[cpu] @ git+https://github.com/tajirhas9/pdf2epub-ai"
-
-# NVIDIA GPU
-uv tool install --python 3.11 "pdf2epub[gpu] @ git+https://github.com/tajirhas9/pdf2epub-ai" \
-  --index paddle=https://www.paddlepaddle.org.cn/packages/stable/cu129/ --index-strategy unsafe-best-match
+uv tool install --python 3.11 "pdf2epub @ git+https://github.com/tajirhas9/pdf2epub-ai"
 ```
 
-Once it is on PyPI the shorter form works: `uv tool install --python 3.11 "pdf2epub[cpu]"`.
-From a downloaded or self-built wheel: `uv tool install --python 3.11 "pdf2epub-0.1.0-py3-none-any.whl[cpu]"`
+The OCR engine (PaddlePaddle) is installed on first use, picked for your hardware: an NVIDIA GPU gets
+the CUDA build that matches its driver (12.9, 12.6 or 11.8; Linux and Windows), everything else gets
+the CPU build. Paddle has no pip build for AMD, Intel or Apple GPUs, so those run on the CPU.
+`pdf2epub install-paddle` does it right away (`--cpu` / `--gpu` to override, `--reinstall` to pick
+again, e.g. after a driver update); `PDF2EPUB_NO_AUTO_INSTALL=1` turns the automatic install off.
+
+**On a Mac** (Apple silicon or Intel), text recognition uses Apple's built-in Vision framework instead:
+nothing to download, and on Apple silicon it runs on the Neural Engine (~0.3 s per page). Setup
+(`pdf2epub init` or the web app) picks it automatically. Scripts Vision can't read (Hindi, Tamil, Greek,
+Hebrew…) still go to PaddleOCR, and page layout always uses Paddle. Switch with
+`pdf2epub config set ocr_engine paddle` (or `apple` / `auto`), `--ocr-engine` per run, or in Settings.
+
+Prefer to choose yourself? The extras still work: `"pdf2epub[cpu] @ …"`, or `"pdf2epub[gpu] @ …"` with
+`--index paddle=https://www.paddlepaddle.org.cn/packages/stable/cu129/ --index-strategy unsafe-best-match`.
+Once it is on PyPI the shorter form works: `uv tool install --python 3.11 pdf2epub`.
+From a downloaded or self-built wheel: `uv tool install --python 3.11 "pdf2epub-0.1.0-py3-none-any.whl"`
 (build one with `uv build --wheel` in a checkout).
 
 ### Step 3 — check it
@@ -147,7 +153,7 @@ Shown automatically the first time (and any time from **Settings → Run first-t
    OCR mistakes, join two-page pictures and read special marks. *No* is fastest and fine for clean,
    born-digital PDFs. You can still switch per book later.
 3. **Connect a model** (only if you chose *Yes*) — pick a provider (llama.cpp, LM Studio, Ollama,
-   OpenAI, Gemini, OpenRouter, or any OpenAI-compatible address), paste the API key if the provider
+   OpenAI, Gemini, OpenRouter, DeepSeek, or any OpenAI-compatible address), paste the API key if the provider
    needs one, choose a model from the list the server offers, and press **Test connection**: it sends
    one small test image and tells you whether the key, the model and image reading work.
 4. **Defaults** — the languages you usually convert (faster, more accurate OCR; leave empty to
@@ -162,7 +168,7 @@ Shown automatically the first time (and any time from **Settings → Run first-t
    - **AI page review** — on/off, and *Pages that need it* (default; skips pages the converter is
      already sure about) or *Every page* (slowest, most thorough).
    - **File name** — defaults to the PDF's name; saved in the output folder shown below it.
-   - **Advanced** — use the GPU, text-line detector (fast/accurate/automatic), render resolution for
+   - **Advanced** — use the GPU, OCR engine (Apple Vision on a Mac / PaddleOCR), text-line detector (fast/accurate/automatic), render resolution for
      digital PDFs, keep intermediate files (for inspecting pages with `pdf2epub dev`).
 3. **Convert to EPUB** — the book appears under **Conversions** with the current step, a progress
    bar and the elapsed time. *Show all steps* lists every step with its timing and findings.
@@ -296,6 +302,7 @@ Any OpenAI-compatible endpoint with a **vision** model works. Set it up in the w
 | OpenAI | `https://api.openai.com/v1` | required |
 | Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` | required |
 | OpenRouter | `https://openrouter.ai/api/v1` | required |
+| DeepSeek | `https://api.deepseek.com` (model `deepseek-flash`) | required |
 
 ```bash
 pdf2epub config set llm.base_url https://openrouter.ai/api/v1
@@ -352,6 +359,7 @@ reasoning_effort = "low"
 | `out_dir` | `PDF2EPUB_OUT_DIR` | current folder | where EPUBs go |
 | `keep_work` | `PDF2EPUB_KEEP_WORK` | false | keep intermediates after success |
 | `use_gpu` | `PDF2EPUB_USE_GPU` | true | use an NVIDIA GPU when present |
+| `ocr_engine` | `PDF2EPUB_OCR_ENGINE` | auto | text recognition: `apple` (Apple Vision, macOS) / `paddle`; auto = Apple Vision on a Mac |
 | `ocr_det_model` | `PDF2EPUB_OCR_DET_MODEL` | auto | text-line detector (`PP-OCRv5_mobile_det` / `_server_det`) |
 | `vector_dpi` | `PDF2EPUB_VECTOR_DPI` | 200 | render resolution for digital PDFs |
 | `workers` | `PDF2EPUB_WORKERS` | 0 (all cores) | parallel page workers |
@@ -405,8 +413,8 @@ PDF again in the web app continues its progress.
 | problem | fix |
 |---|---|
 | `Node.js >= 22.12 is needed` / setup shows ✕ Node.js | install Node 22+, open a new terminal, *Check again* |
-| `PaddlePaddle is not installed` / ✕ OCR engine | reinstall with an extra: `uv tool install --reinstall "pdf2epub[cpu] @ …"` (or `[gpu]` with the index flags) |
-| GPU not used | NVIDIA driver + the `[gpu]` install; check `nvidia-smi`. In Docker add `--gpus all` |
+| `PaddlePaddle is not installed` / ✕ OCR engine | `pdf2epub install-paddle` (or *Try again* in the web app); `--cpu` if the GPU build fails |
+| GPU not used | update the NVIDIA driver (check `nvidia-smi`), then `pdf2epub install-paddle --reinstall`. In Docker add `--gpus all` |
 | `cannot reach the LLM at …` | is the server running? right address and port? `pdf2epub llm-check`; or convert with `--no-llm` |
 | HTTP 401/403 from the model | wrong or missing API key; for local servers in Docker see [Docker](#docker) |
 | AI review very slow | turn off "thinking" (see [tips](#connecting-an-ai-model)), `llm.concurrency 1` for one-slot local servers, or review only flagged pages |
@@ -463,13 +471,15 @@ LLM review (validated edit ops on IR) ◀── page image + zoomed crops ──
 
 ```bash
 git clone https://github.com/tajirhas9/pdf2epub-ai && cd pdf2epub-ai
-scripts/setup.sh              # .venv (GPU/CPU Paddle auto-picked) + web/node_modules + epubcheck, all in the repo
+scripts/setup.sh              # .venv + best Paddle build for this machine + web/node_modules + epubcheck, all in the repo
 uv run pdf2epub init          # writes .pdf2epub.toml (gitignored); or copy .env.example to .env.local
 uv run pdf2epub llm-check
 ```
 
 Everything heavy lives inside the project (`.venv`, `.cache`, `web/node_modules`, `work/`); in a
-checkout prefix commands with `uv run`.
+checkout prefix commands with `uv run`. Plain `uv run pdf2epub ui` works too: Paddle is installed on first use.
+`uv sync` removes it again (it is not in the lockfile, since the right build depends on the
+hardware); the next `uv run pdf2epub …` puts it back, or run `uv run pdf2epub install-paddle`.
 
 ```bash
 uv run pytest                 # unit + end-to-end (synthetic PDF → EPUB → epubcheck) + web backend

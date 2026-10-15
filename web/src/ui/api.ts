@@ -15,10 +15,13 @@ export type Values = {
   keep_work: boolean
   use_gpu: boolean
   ocr_det_model: string
+  ocr_engine: OcrEngine
   vector_dpi: number
 }
 
-export interface Provider { id: string; label: string; base_url: string; needs_key: boolean; hint: string }
+export type OcrEngine = 'auto' | 'apple' | 'paddle'
+
+export interface Provider { id: string; label: string; base_url: string; needs_key: boolean; hint: string; default_model: string }
 export interface Language { code: string; name: string }
 
 export interface State {
@@ -41,6 +44,27 @@ export interface System {
   models: boolean
   paddle: boolean
   gpu: boolean
+  hardware: { os: string; arch: string; cpus: number; ram_gb: number; gpus: string[] }
+  paddle_installed: { package: string; version: string } | null
+  paddle_choice: { build: PaddleBuild | null; reason: string }
+  paddle_upgrade: boolean
+  paddle_install: PaddleInstall
+  paddle_manual: string
+  paddle_auto: boolean
+  /** text recognition engines on this computer; `recommended` is what "auto" resolves to */
+  ocr_engines: { available: OcrEngine[]; recommended: OcrEngine; label?: string; reason: string }
+}
+
+export interface PaddleBuild { key: string; package: string; version: string; label: string; gpu: boolean }
+
+export interface PaddleInstall {
+  running: boolean
+  done: boolean
+  error: string
+  build: PaddleBuild | null
+  reason: string
+  restart: boolean
+  log: string[]
 }
 
 export interface Upload { id: string; name: string; title: string; pages: number }
@@ -53,13 +77,14 @@ export interface ConvertOptions {
   keep_work: boolean
   use_gpu: boolean
   ocr_det_model: string
+  ocr_engine: OcrEngine
   vector_dpi: number
 }
 
 export interface Step {
   key: string
   label: string
-  status: 'running' | 'done' | 'failed' | 'paused'
+  status: 'pending' | 'running' | 'done' | 'failed' | 'paused' | 'skipped'
   done: number
   total: number | null
   note: string
@@ -84,6 +109,8 @@ export interface Job {
     chapters: number
     pages: number
     attention: string[]
+    /** pages the AI review couldn't do (its call failed), with the reason; retry with api.retryReview */
+    review_failed?: { page: number; reason: string }[]
     work_dir: string | null
     epubcheck: string
     note: string
@@ -91,6 +118,8 @@ export interface Job {
   error: { message: string; hint: string } | null
   /** while queued: what runs first (another conversion, or the OCR models loading/downloading) */
   waiting: 'conversion' | 'models' | 'download' | null
+  /** steps it can be redone from (that step and every one after it); empty while it runs */
+  retry_steps: string[]
 }
 
 export interface LlmFields { base_url: string; model: string; api_key?: string; extra_body?: unknown; extra_headers?: unknown }
@@ -116,6 +145,8 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 export const api = {
   state: () => call<State>('GET', 'state'),
   system: () => call<System>('GET', 'system'),
+  installPaddle: (want: 'auto' | 'gpu' | 'cpu' = 'auto') => call<PaddleInstall>('POST', 'system/paddle', { want }),
+  paddleStatus: () => call<PaddleInstall>('GET', 'system/paddle'),
   saveConfig: (changes: { set?: Partial<Values>; unset?: string[]; api_key?: string; clear_api_key?: boolean }) =>
     call<State>('PUT', 'config', changes),
   models: (f: LlmFields) => call<{ models: string[] }>('POST', 'models', f),
@@ -125,6 +156,8 @@ export const api = {
   cancel: (id: string) => call('POST', `jobs/${id}/cancel`),
   pause: (id: string) => call('POST', `jobs/${id}/pause`),
   resume: (id: string) => call('POST', `jobs/${id}/resume`),
+  retryReview: (id: string) => call('POST', `jobs/${id}/retry-review`),
+  retryFrom: (id: string, step: string) => call('POST', `jobs/${id}/retry-from`, { step }),
   removeJob: (id: string) => call('DELETE', `jobs/${id}`),
   getUpload: (id: string) => call<Upload>('GET', `uploads/${id}`),
   removeUpload: (id: string) => call('DELETE', `uploads/${id}`),

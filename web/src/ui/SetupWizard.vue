@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useDraft } from './draft'
 import LangPicker from './LangPicker.vue'
 import LlmForm from './LlmForm.vue'
@@ -19,11 +19,19 @@ const steps = computed(() => [
 const index = ref(0)
 const step = computed(() => steps.value[index.value]!)
 const last = computed(() => index.value === steps.value.length - 1)
+// OCR engine: preselect the best one for this computer (Apple Vision on a Mac); the user may switch.
+const engines = computed(() => store.system?.ocr_engines)
+const engineChoice = computed(() => (engines.value?.available.length ?? 0) > 1)
+watch(
+  engines,
+  (e) => { if (e && d.values.ocr_engine === 'auto') d.values.ocr_engine = e.recommended },
+  { immediate: true },
+)
 const blocked = computed(() => step.value.id === 'system' && store.system !== null && (!store.system.node_ok || !store.system.paddle))
 
 async function finish(skip = false) {
   try {
-    await d.save(skip ? ['llm.enabled'] : ['llm.enabled', 'llm.base_url', 'llm.model', 'langs'])
+    await d.save(skip ? ['llm.enabled'] : ['llm.enabled', 'llm.base_url', 'llm.model', 'langs', 'ocr_engine'])
     toast(skip ? 'Setup skipped — you can change everything in Settings.' : 'All set. Add a PDF to convert it.')
     emit('done')
   } catch (e) {
@@ -49,6 +57,22 @@ async function finish(skip = false) {
       <template v-if="step.id === 'system'">
         <header><h2>Check this computer</h2></header>
         <SystemCheck />
+        <div v-if="engineChoice" class="engine">
+          <h3>Text recognition engine</h3>
+          <div class="choices" role="radiogroup">
+            <label class="choice" :class="{ on: d.values.ocr_engine === 'apple' }">
+              <input v-model="d.values.ocr_engine" type="radio" value="apple" name="ocr" />
+              <b>{{ engines!.label || 'Apple Vision' }} <span class="badge accent">best for this Mac</span></b>
+              <span class="muted small">Built into macOS, nothing to download. Uses the Neural Engine and GPU on
+                Apple silicon. Scripts it can't read (Hindi, Tamil, Greek…) still go to PaddleOCR.</span>
+            </label>
+            <label class="choice" :class="{ on: d.values.ocr_engine === 'paddle' }">
+              <input v-model="d.values.ocr_engine" type="radio" value="paddle" name="ocr" />
+              <b>PaddleOCR</b>
+              <span class="muted small">The engine used on Windows and Linux. Runs on the CPU on a Mac (slower).</span>
+            </label>
+          </div>
+        </div>
         <p v-if="blocked" class="notice err" style="margin-top: 1rem">Fix the items marked ✕ first, then click <b>Check again</b>.</p>
       </template>
 
@@ -60,7 +84,7 @@ async function finish(skip = false) {
             <b>Yes, review with AI <span class="badge accent">best quality</span></b>
             <span class="muted small">A vision model compares every page with the original and fixes OCR mistakes,
               joins two-page pictures and reads special marks. Works with local servers (llama.cpp, LM Studio, Ollama)
-              or cloud APIs (OpenAI, Gemini, OpenRouter…).</span>
+              or cloud APIs (OpenAI, Gemini, OpenRouter, DeepSeek…).</span>
           </label>
           <label class="choice" :class="{ on: !d.values['llm.enabled'] }">
             <input v-model="d.values['llm.enabled']" type="radio" :value="false" name="mode" />
@@ -134,6 +158,8 @@ async function finish(skip = false) {
 .choice.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent-soft) 45%, transparent); }
 .choice input { position: absolute; left: 1rem; top: 1.05rem; accent-color: var(--accent); }
 .choice b { display: flex; align-items: center; gap: 0.5rem; }
+.engine { margin-top: 1.25rem; display: grid; gap: 0.6rem; }
+.engine h3 { margin: 0; font-size: 0.95rem; }
 .nav { display: flex; gap: 0.6rem; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--line); }
 @media (max-width: 560px) { .progress .t { display: none; } .progress li.active .t { display: inline; } }
 </style>

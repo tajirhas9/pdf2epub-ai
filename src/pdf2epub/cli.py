@@ -13,6 +13,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from pdf2epub.config import Settings
@@ -37,6 +38,7 @@ def _settings(
     keep_work: bool | None = None,
     llm: bool | None = None,
     out_dir: Path | None = None,
+    ocr_engine: str | None = None,
 ) -> Settings:
     overrides: dict = {}
     if langs:
@@ -45,6 +47,8 @@ def _settings(
         overrides["keep_work"] = keep_work
     if out_dir is not None:
         overrides["out_dir"] = out_dir.expanduser().resolve()
+    if ocr_engine:
+        overrides["ocr_engine"] = ocr_engine
     settings = Settings(**overrides)
     if llm is not None:  # CLI flag wins over LLM_ENABLED
         settings.llm.enabled = llm
@@ -55,6 +59,11 @@ LLM_OPT = typer.Option(
     "--llm/--no-llm",
     help="Have the LLM check every page against the scan (default: on, see `pdf2epub config`). "
     "--no-llm is fastest and fine for clean digital PDFs.",
+    show_default=False,
+)
+OCR_OPT = typer.Option(
+    "--ocr-engine",
+    help="Text recognition: auto (Apple Vision on macOS, PaddleOCR elsewhere) | apple | paddle.",
     show_default=False,
 )
 RESTART_OPT = typer.Option(
@@ -201,11 +210,28 @@ def _pausable():
         signal.signal(signal.SIGINT, previous)
 
 
+def _ensure_paddle() -> None:
+    """First use: install the PaddlePaddle build that fits this computer (skip: PDF2EPUB_NO_AUTO_INSTALL=1)."""
+    from pdf2epub import paddle_install as pi
+
+    if pi.importable() or not pi.auto_install_enabled():
+        return
+    choice = pi.choose()
+    console.print(
+        f"[cyan]PaddlePaddle is not installed[/] — installing it once: {escape(choice.reason)}", highlight=False
+    )
+    with console.status("installing PaddlePaddle (a few hundred MB, one time)…") as status:
+        build = pi.install(choice, lambda line: status.update(f"[dim]{escape(line[:110])}[/]"))
+    console.print(f"[green]✓[/] PaddlePaddle {build.version} ({build.label}) installed", highlight=False)
+
+
 def _convert_steps(
     settings: Settings, source: Path, pages: set[int] | None, from_stage: str | None, rep, restart: bool = False
 ):
     from pdf2epub import app as core
     from pdf2epub.resume import describe
+
+    _ensure_paddle()
 
     def resuming(run: dict) -> None:
         console.print(f"[cyan]Resuming:[/] {describe(run)}", highlight=False)
@@ -221,6 +247,12 @@ def _convert_steps(
             pause_requested=pause_requested,
             on_resume=resuming,
         )
+
+
+FROM_STAGE_HELP = (
+    "Redo this step and every step after it, keeping the steps before it: "
+    "rasterize, layout, text, running, figures, spreads, order, glyphs, codegen, review"
+)
 
 
 def _finish(settings: Settings, book_dir: Path, res, t0: float) -> None:
@@ -253,13 +285,16 @@ def _finish(settings: Settings, book_dir: Path, res, t0: float) -> None:
 def convert(
     source: Annotated[Path, typer.Argument(exists=True, metavar="PDF", help="PDF file (or a folder of page images)")],
     pages: Annotated[str | None, typer.Option(help="Only these pages, e.g. 1-5,9")] = None,
-    from_stage: Annotated[str | None, typer.Option(help="Resume from this stage")] = None,
+    from_stage: Annotated[str | None, typer.Option(help=FROM_STAGE_HELP)] = None,
     langs: Annotated[str | None, typer.Option(help="Language hints, e.g. en,ar (scripts are auto-detected)")] = None,
     llm: Annotated[bool | None, LLM_OPT] = None,
     restart: Annotated[bool, RESTART_OPT] = False,
+    ocr_engine: Annotated[str | None, OCR_OPT] = None,
 ) -> None:
     """Extract pages and generate one Vue page per PDF page (then LLM review); no EPUB yet."""
-    settings = _settings(langs, llm=llm)
+    settings = _settings(langs, llm=llm, ocr_engine=ocr_engine)
+    if from_stage in ("build", "validate"):
+        raise typer.BadParameter("`convert` doesn't build the EPUB; use `pdf2epub run --from-stage build`")
     _header(source.name, _source_details(source, settings))
     t = time.perf_counter()
     with _reporting() as rep:
@@ -278,17 +313,27 @@ def review(
     book: Annotated[str | None, typer.Option(help="Book id or source path (default: latest)")] = None,
     pages: Annotated[str | None, typer.Option(help="Only these pages, e.g. 1-5")] = None,
     policy: Annotated[str | None, typer.Option(help="flagged | all")] = None,
+    failed: Annotated[bool, typer.Option("--failed", help="Only the pages whose review failed last time")] = False,
 ) -> None:
     """LLM review: compares each page with its source image and applies validated fixes."""
     from pdf2epub import app as core
+    from pdf2epub.review import review_failures
 
     settings = _settings()
     if policy:
         settings.llm.review_policy = policy
+    _ensure_paddle()
     book_dir = core.resolve_book(settings, book)
+    selected = _parse_pages(pages)
+    if failed:
+        fails = set(review_failures(book_dir))
+        selected = fails if selected is None else fails & selected
+        if not selected:
+            console.print("[green]✓[/] no failed review pages to retry")
+            return
     _header(f"review {book_dir.name}", [_llm_line(settings)])
     with _reporting() as rep, _pausable() as pause_requested:
-        summary = core.review(settings, book_dir, _parse_pages(pages), rep, pause_requested)
+        summary = core.review(settings, book_dir, selected, rep, pause_requested)
     console.print()
     console.print(f"[green]✓[/] {summary['text']}", highlight=False)
 
@@ -399,6 +444,7 @@ def ui(
     """Web app: first-run setup, settings, upload a PDF and convert it (same engine as the CLI)."""
     import threading
 
+    from pdf2epub import paddle_install as pi
     from pdf2epub.browser import bind_host, free_port
     from pdf2epub.webui.server import ensure_ui, make_server
 
@@ -406,6 +452,13 @@ def ui(
     _header("web app", [])
     with console.status("preparing the web app…"):
         dist = ensure_ui(settings)
+    if not pi.importable() and pi.auto_install_enabled():
+        started = pi.INSTALLER.start()
+        console.print(
+            f"[cyan]Installing PaddlePaddle in the background[/] — {escape(started['reason'])}"
+            " (progress in the web app)",
+            highlight=False,
+        )
     host = host or bind_host()
     port = free_port(port, host)
     server, web = make_server(host, port, dist, settings)
@@ -457,16 +510,18 @@ def run(
     llm: Annotated[bool | None, LLM_OPT] = None,
     keep_work: Annotated[bool, typer.Option(help="Keep intermediates after a successful build")] = False,
     restart: Annotated[bool, RESTART_OPT] = False,
+    ocr_engine: Annotated[str | None, OCR_OPT] = None,
+    from_stage: Annotated[str | None, typer.Option(help=FROM_STAGE_HELP + ", build")] = None,
 ) -> None:
     """One shot: convert → (LLM review) → build EPUB → validate → clean up."""
     from pdf2epub import app as core
 
     out, out_dir = _split_output(output)
-    settings = _settings(langs, keep_work=keep_work, llm=llm, out_dir=out_dir)
+    settings = _settings(langs, keep_work=keep_work, llm=llm, out_dir=out_dir, ocr_engine=ocr_engine)
     _header(source.name, _source_details(source, settings))
     t = time.perf_counter()
     with _reporting() as rep:
-        _, ctx = _convert_steps(settings, source, None, None, rep, restart)
+        _, ctx = _convert_steps(settings, source, None, from_stage, rep, restart)
         res = core.build(settings, ctx.book_dir, out, reporter=rep)
     _finish(settings, ctx.book_dir, res, t)
 
@@ -561,7 +616,7 @@ def eval_(
 
 def init(
     provider: Annotated[
-        str | None, typer.Option(help="llamacpp|lmstudio|ollama|openai|gemini|openrouter|custom|none")
+        str | None, typer.Option(help="llamacpp|lmstudio|ollama|openai|gemini|openrouter|deepseek|custom|none")
     ] = None,
     base_url: Annotated[str | None, typer.Option(help="Endpoint URL (default per provider)")] = None,
     model: Annotated[str | None, typer.Option(help="Model id (vision-capable)")] = None,
@@ -662,6 +717,40 @@ def llm_check() -> None:
         raise typer.Exit(1)
 
 
+def install_paddle(
+    cpu: Annotated[bool, typer.Option("--cpu", help="CPU build even if a GPU is present")] = False,
+    gpu: Annotated[bool, typer.Option("--gpu", help="GPU build only (fail instead of falling back to CPU)")] = False,
+    reinstall: Annotated[bool, typer.Option("--reinstall", help="Pick and install again even if installed")] = False,
+) -> None:
+    """Detect the hardware, pick the best PaddlePaddle build (NVIDIA CUDA version or CPU) and install it."""
+    from pdf2epub import paddle_install as pi
+    from pdf2epub.hardware import probe
+
+    hw = probe()
+    gpus = ", ".join(g.name for g in hw.gpus) or "none"
+    current = pi.installed()
+    _header(
+        "install-paddle",
+        [
+            f"{hw.os} {hw.arch} · {hw.cpu_count} cores · {hw.ram_mb // 1024} GB RAM",
+            f"GPU: {gpus}",
+            "installed: " + (f"{current[0]} {current[1]}" if current else "nothing"),
+        ],
+    )
+    choice = pi.choose(hw, "cpu" if cpu else "gpu" if gpu else "auto")
+    console.print(escape(choice.reason), highlight=False)
+    best = choice.build
+    if current and best and not reinstall and current == (best.package, best.version):
+        console.print("[green]✓[/] Already installed. Use --reinstall to install it again.")
+        return
+    try:
+        build = pi.install(choice, lambda line: console.print(f"[dim]{escape(line)}[/]", highlight=False))
+    except pi.InstallError as e:
+        console.print(f"[red]✗[/] {e}", highlight=False)
+        raise typer.Exit(1) from None
+    console.print(f"[green]✓[/] PaddlePaddle {build.version} ({build.label}) is ready.", highlight=False)
+
+
 # Registration order = order in `pdf2epub --help` (panels: Convert, Setup, Maintenance, Development).
 app.command(rich_help_panel="Convert", help="Convert a PDF to EPUB in one go: convert → review → build.")(run)
 app.command(rich_help_panel="Convert", help="Open the web app: setup, settings, upload and convert in the browser.")(ui)
@@ -673,6 +762,9 @@ app.command(rich_help_panel="Convert", help="Let the LLM compare each page with 
 app.command(rich_help_panel="Convert", help="Make the EPUB from a converted book and validate it.")(build)
 app.command(rich_help_panel="Setup", help="First-run setup: LLM provider, model, API key and defaults.")(init)
 app.command(rich_help_panel="Setup", help="Test the LLM connection, image reading and structured output.")(llm_check)
+app.command(rich_help_panel="Setup", help="Install the best PaddlePaddle build (OCR engine) for this computer.")(
+    install_paddle
+)
 app.add_typer(config_app, name="config", rich_help_panel="Setup")
 app.command(rich_help_panel="Maintenance", help="Delete intermediate files of one book (or --all).")(clean)
 app.command(rich_help_panel="Maintenance", help="Remove downloaded models, caches, settings and the stored API key.")(

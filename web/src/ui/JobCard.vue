@@ -1,27 +1,19 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { api, formatSeconds, formatSize, type Job } from './api'
+import { isActive, isPreparing, statusOf } from './jobs'
 import { errorText, toast } from './store'
 
-const props = defineProps<{ job: Job }>()
-const emit = defineEmits<{ changed: [] }>()
+// `detailed`: the conversion's own page, with every step listed.
+const props = defineProps<{ job: Job; detailed?: boolean }>()
+const emit = defineEmits<{ changed: []; removed: []; created: [id: string] }>()
 
-const STATUS = {
-  queued: { text: 'Waiting', cls: '' },
-  running: { text: 'Converting', cls: 'accent' },
-  pausing: { text: 'Pausing…', cls: 'warn' },
-  paused: { text: 'Paused', cls: 'warn' },
-  cancelling: { text: 'Stopping…', cls: 'warn' },
-  done: { text: 'Done', cls: 'ok' },
-  failed: { text: 'Failed', cls: 'err' },
-  cancelled: { text: 'Stopped', cls: '' },
-} as const
-const preparing = computed(() => props.job.status === 'queued' && (props.job.waiting === 'models' || props.job.waiting === 'download'))
-const status = computed(() => (preparing.value ? { text: 'Preparing', cls: 'accent' } : STATUS[props.job.status]))
-const active = computed(() => ['queued', 'running', 'pausing', 'cancelling'].includes(props.job.status))
+const preparing = computed(() => isPreparing(props.job))
+const status = computed(() => statusOf(props.job))
+const active = computed(() => isActive(props.job))
 const pauseReason = computed(() => {
   const reason = props.job.reason
-  if (reason.startsWith('llm-unreachable')) return { title: 'The AI server stopped answering', hint: 'Start it again, then press Resume.', detail: reason.slice(reason.indexOf(':') + 1).trim() }
+  if (reason.startsWith('llm-unreachable')) return { title: 'The AI review stopped', hint: 'Fix the cause below (server down, rate limit, credit, model or key), then press Resume.', detail: reason.slice(reason.indexOf(':') + 1).trim() }
   if (reason === 'interrupted') return { title: 'Interrupted', hint: 'The app or computer stopped during the conversion. Press Resume to continue.', detail: '' }
   return { title: 'Paused', hint: 'Press Resume to continue.', detail: '' }
 })
@@ -30,7 +22,7 @@ const done = computed(() => {
   return s ? `${s.label}: ${s.done} / ${s.total}` : ''
 })
 const current = computed(() => [...props.job.steps].reverse().find((s) => s.status === 'running'))
-const showSteps = ref(false)
+const showSteps = ref(!!props.detailed)
 const r = computed(() => props.job.result)
 const optionsLine = computed(() => {
   const o = props.job.options
@@ -51,8 +43,34 @@ async function act(fn: () => Promise<unknown>) {
 const stop = () => act(() => api.cancel(props.job.id))
 const pause = () => act(() => api.pause(props.job.id))
 const resume = () => act(() => api.resume(props.job.id))
-const remove = () => act(() => api.removeJob(props.job.id))
-const again = () => act(() => api.convert(props.job.file.id, props.job.options))
+const retryReview = () => act(() => api.retryReview(props.job.id))
+const reviewFailed = computed(() => r.value?.review_failed ?? [])
+function retryFrom(step: { key: string; label: string }) {
+  if (!confirm(`Redo “${step.label}” and every step after it? The steps before it are kept.`)) return
+  act(() => api.retryFrom(props.job.id, step.key))
+}
+// the step that failed or was interrupted, when it can be redone from
+const stuckStep = computed(() => {
+  if (props.job.status !== 'failed' && props.job.status !== 'paused') return undefined
+  const s = props.job.steps.find((x) => x.status === 'failed' || x.status === 'paused')
+  return s && props.job.retry_steps.includes(s.key) ? s : undefined
+})
+async function remove() {
+  try {
+    await api.removeJob(props.job.id)
+    emit('removed')
+  } catch (e) {
+    toast(errorText(e), 'err')
+  }
+}
+async function again() {
+  try {
+    const job = await api.convert(props.job.file.id, props.job.options)
+    emit('created', job.id)
+  } catch (e) {
+    toast(errorText(e), 'err')
+  }
+}
 
 async function copyPath() {
   try {
@@ -62,6 +80,7 @@ async function copyPath() {
     toast('Copy failed — select the path and copy it manually', 'err')
   }
 }
+const ICONS = { pending: '○', running: '', done: '✓', failed: '✕', paused: '⏸', skipped: '–' } as const
 const pct = (s: { done: number; total: number | null }) => (s.total ? Math.round((100 * s.done) / s.total) : 0)
 </script>
 
@@ -130,13 +149,24 @@ const pct = (s: { done: number; total: number | null }) => (s.total ? Math.round
           <li v-for="a in r.attention" :key="a">{{ a }}</li>
         </ul>
       </div>
+      <div v-if="reviewFailed.length" class="attention">
+        <h4>{{ reviewFailed.length }} page{{ reviewFailed.length === 1 ? '' : 's' }} not reviewed by the AI</h4>
+        <p class="small">The AI request for these pages failed, so they keep the OCR text as is.</p>
+        <details class="small">
+          <summary>Why</summary>
+          <ul>
+            <li v-for="f in reviewFailed" :key="f.page">p{{ f.page }} — {{ f.reason }}</li>
+          </ul>
+        </details>
+        <button type="button" class="btn" @click="retryReview">Retry failed pages</button>
+      </div>
       <p v-if="r.work_dir" class="muted small">Intermediate files kept: <code>{{ r.work_dir }}</code> — inspect with <code>pdf2epub dev</code></p>
     </div>
 
     <!-- paused: progress is saved after every page -->
     <div v-if="job.status === 'paused'" class="notice" :class="{ err: job.reason.startsWith('llm-unreachable') }">
       <p><b>{{ pauseReason.title }}</b><span v-if="done" class="muted"> · {{ done }}</span></p>
-      <p class="small">{{ pauseReason.hint }} It continues from the last finished page.</p>
+      <p class="small">{{ pauseReason.hint }} It continues from the last finished page; pages whose AI review failed are tried again.</p>
       <pre v-if="pauseReason.detail">{{ pauseReason.detail }}</pre>
     </div>
 
@@ -144,12 +174,15 @@ const pct = (s: { done: number; total: number | null }) => (s.total ? Math.round
     <div v-if="job.status === 'failed' && job.error" class="notice err">
       <p><b>{{ job.error.message }}</b></p>
       <pre v-if="job.error.hint">{{ job.error.hint }}</pre>
-      <p class="small">Converting again reuses the AI review results already done; the other steps rerun quickly.</p>
+      <p class="small">
+        After fixing the cause, retry from the step that failed (or any step in the list) to keep the work before it.
+        Converting again reuses the AI review results already done.
+      </p>
     </div>
 
     <footer class="row wrap">
       <button
-        v-if="job.steps.length"
+        v-if="job.steps.length && !detailed"
         type="button"
         class="btn ghost toggle"
         :aria-expanded="showSteps"
@@ -172,20 +205,32 @@ const pct = (s: { done: number; total: number | null }) => (s.total ? Math.round
       </template>
       <template v-else-if="job.status === 'paused'">
         <button type="button" class="btn primary" @click="resume">Resume</button>
+        <button v-if="stuckStep" type="button" class="btn" title="Redo this step and every step after it" @click="retryFrom(stuckStep)">Retry {{ stuckStep.label.toLowerCase() }}</button>
         <button type="button" class="btn ghost" title="Discards the saved progress" @click="remove">Remove</button>
       </template>
       <template v-else>
+        <button v-if="stuckStep" type="button" class="btn primary" title="Redo this step and every step after it" @click="retryFrom(stuckStep)">Retry {{ stuckStep.label.toLowerCase() }}</button>
         <button v-if="job.status !== 'done'" type="button" class="btn" @click="again">Convert again</button>
         <button type="button" class="btn ghost" @click="remove">Remove</button>
       </template>
     </footer>
+    <h4 v-if="detailed && job.steps.length" class="steps-title">Steps</h4>
     <ol v-if="showSteps" :id="`steps-${job.id}`" class="steps">
       <li v-for="s in job.steps" :key="s.key" :class="s.status">
         <span class="icon" aria-hidden="true">
           <span v-if="s.status === 'running'" class="spinner" />
-          <template v-else>{{ s.status === 'done' ? '✓' : s.status === 'paused' ? '⏸' : '✕' }}</template>
+          <template v-else>{{ ICONS[s.status] }}</template>
         </span>
-        <span class="name">{{ s.label }}</span>
+        <span class="name">
+          <span :title="s.status === 'skipped' ? 'Not needed this time' : undefined">{{ s.label }}</span>
+          <button
+            v-if="!active && job.retry_steps.includes(s.key)"
+            type="button"
+            class="link-btn retry"
+            :title="`Redo ${s.label.toLowerCase()} and every step after it`"
+            @click="retryFrom(s)"
+          >Retry from here</button>
+        </span>
         <span class="count muted">{{ s.total ? `${s.done}/${s.total}` : '' }}</span>
         <span class="time muted">{{ s.seconds != null ? formatSeconds(s.seconds) : '' }}</span>
         <span v-if="s.note" class="note muted">{{ s.note }}</span>
@@ -209,16 +254,23 @@ const pct = (s: { done: number; total: number | null }) => (s.total ? Math.round
 .attention { background: var(--warn-soft); border-radius: 8px; padding: 0.6rem 0.85rem; font-size: 0.86rem; }
 .attention h4 { margin: 0 0 0.25rem; font-size: 0.86rem; color: var(--warn); }
 .attention ul { margin: 0; padding-left: 1.1rem; }
+.attention p, .attention details { margin: 0 0 0.35rem; }
+.attention .btn { margin-top: 0.35rem; }
 pre { white-space: pre-wrap; word-break: break-word; margin: 0.4rem 0 0; font-size: 0.78rem; max-height: 14rem; overflow: auto; }
 footer { border-top: 1px solid var(--line); padding-top: 0.75rem; }
 .toggle { padding-left: 0; font-size: 0.86rem; }
 .chev { display: inline-block; transition: transform 0.15s; font-size: 1.1em; }
 .chev.open { transform: rotate(90deg); }
+.steps-title { margin: 0; font-size: 0.86rem; color: var(--muted); }
 .steps { list-style: none; padding: 0; margin: -0.4rem 0 0; display: grid; gap: 0.15rem; font-size: 0.86rem; }
 .steps li { display: grid; grid-template-columns: 1.3rem 1fr auto 3.5rem; gap: 0.5rem; align-items: center; padding: 0.15rem 0; }
 .steps .note { grid-column: 2 / -1; font-size: 0.8rem; margin-top: -0.2rem; }
+.steps .retry { margin-left: 0.6rem; font-size: 0.8rem; opacity: 0; }
+.steps li:hover .retry, .steps .retry:focus-visible, .steps li.failed .retry, .steps li.paused .retry { opacity: 1; }
+@media (hover: none) { .steps .retry { opacity: 1; } }
 .steps .time, .steps .count { text-align: right; font-variant-numeric: tabular-nums; }
 .steps li.done .icon { color: var(--ok); }
 .steps li.failed .icon { color: var(--err); }
 .steps li.paused .icon { color: var(--warn); }
+.steps li.pending, .steps li.skipped { color: var(--muted); }
 </style>

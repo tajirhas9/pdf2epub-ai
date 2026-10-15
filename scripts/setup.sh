@@ -9,9 +9,9 @@ command -v uv >/dev/null || { echo "install uv first: https://docs.astral.sh/uv/
 command -v node >/dev/null || { echo "install Node.js >= 22.12"; exit 1; }
 
 echo "== Python deps (.venv)"
-if command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1; then EXTRA=gpu; else EXTRA=cpu; fi
-echo "   Paddle: $EXTRA"
-uv sync --extra "$EXTRA"
+uv sync
+echo "== PaddlePaddle (best build for this computer: NVIDIA CUDA or CPU)"
+uv run pdf2epub install-paddle
 
 echo "== Web deps (web/node_modules)"
 (cd web && npm ci)
