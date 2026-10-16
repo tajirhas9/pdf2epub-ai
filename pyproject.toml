@@ -63,8 +63,10 @@ packages = ["src/pdf2epub"]
 
 [dependency-groups]
 dev = [
+    "basedpyright>=1.40.2",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "ruff>=0.17.1",
 ]
 
 [[tool.uv.index]]
@@ -78,15 +80,56 @@ paddlepaddle-gpu = { index = "paddle-cu129" }
 [tool.uv]
 conflicts = [[{ extra = "cpu" }, { extra = "gpu" }]]
 
-[tool.ruff]
-line-length = 120
-target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["web", "work", "out", "eval", ".cache"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "B",        # bugbear
+    "UP",       # pyupgrade
+    "SIM",      # simplify
+    "C4",       # comprehensions
+    "PIE",      # misc lints
+    "RET",      # return statements
+    "PTH",      # prefer pathlib
+    "PERF",     # performance anti-patterns
+    "FURB",     # refurb
+    "ASYNC",    # blocking calls in async code
+    "RUF",      # ruff-specific
+]
+ignore = [
+    "E501",                          # line length is the formatter's job
+    "RUF001", "RUF002", "RUF003",    # ambiguous unicode: PDF text handling uses these glyphs on purpose
+]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B023"]  # helper closures are called inside the loop iteration that defines them
+
+[tool.ruff.lint.isort]
+known-first-party = ["pdf2epub"]
+
+[tool.ruff.format]
+quote-style = "double"
+docstring-code-format = true
+
+[tool.basedpyright]
+pythonVersion = "3.11"
+venvPath = "."
+venv = ".venv"
+include = ["src", "tests"]
+exclude = ["**/__pycache__", "**/node_modules", ".venv", "web", "work", "out", "eval", ".cache"]
+# "standard" catches real bugs without the flood "recommended"/"strict" produce on untyped third-party libs.
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
+reportUnnecessaryTypeIgnoreComment = "warning"
+reportImplicitOverride = false
+deprecateTypingAliases = true
