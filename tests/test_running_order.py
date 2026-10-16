@@ -128,3 +128,19 @@ def test_lone_unnumbered_note_takes_the_only_marker():
     )
     link_footnotes(p)
     assert [s.note_ref for s in p.block("a").spans if s.note_ref] == ["n"]
+
+
+def test_continued_note_is_not_a_label():
+    # "1/69)" continues note 2 from the line above; it must not steal marker 1 from the real note 1.
+    p = page(
+        0,
+        [
+            block("a", "with some Verses of the Noble Qur'an.1 As for the date", order=0),
+            block("n1", "1 Ibn Hajar said", t=BlockType.FOOTNOTE, order=1),
+            block("n2", "2 Historians differ (Muhadarat Tarikh", t=BlockType.FOOTNOTE, order=2),
+            block("n2b", "1/69). We gave preference", t=BlockType.FOOTNOTE, order=3),
+        ],
+    )
+    link_footnotes(p)
+    assert [s.note_ref for s in p.block("a").spans if s.note_ref] == ["n1"]
+    assert p.block("n2b").text.startswith("1/69)")

@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from pdf2epub.ir import Block, BlockType, Document, Page, Role, Span
+from pdf2epub.textutil import NOTE_LABEL_RE, UNSUP
 
 HEADER_RE = re.compile(r"^<!-- pdf2epub:sha=([0-9a-f]{16}) -->\n")
 
@@ -53,6 +54,10 @@ class VuePageWriter:
             for s in b.spans
             if s.note_ref
         }
+
+    def _note_ids(self) -> set[str]:
+        """Footnotes that get rendered: a marker to anything else would be a dangling link."""
+        return {b.id for p in self.doc.pages for b in p.content_blocks if b.type == BlockType.FOOTNOTE}
 
     # ---- public -------------------------------------------------------------------------
 
@@ -147,14 +152,14 @@ class VuePageWriter:
         for i, s in enumerate(spans):
             text = s.text
             if strip_label and i == 0:
-                text = re.sub(r"^\s*\d+[.)]?\s*", "", text)
+                text = NOTE_LABEL_RE.sub("", text, count=1)
             if s.glyph and (g := self.doc.glyphs.get(s.glyph)) and g.render != "text" and g.image:
                 # Unverified special mark: keep the printed glyph rather than risk wrong text.
                 out.append(
                     f'<BookGlyph src="{esc_attr(g.image.path)}" :width="{g.image.width}" :height="{g.image.height}" />'
                 )
                 continue
-            if s.note_ref:
+            if s.note_ref and s.note_ref in self._note_ids():
                 out.append(f'<NoteRef to="{esc_attr(s.note_ref)}" label="{esc_attr(text.strip())}" />')
                 continue
             piece = esc(text)
@@ -261,5 +266,5 @@ def _lang_attrs(b: Block) -> str:
 
 
 def _note_label(b: Block) -> str:
-    m = re.match(r"^\s*(\d+)", b.text)
-    return m.group(1) if m else ""
+    m = NOTE_LABEL_RE.match(b.text)
+    return m.group(1).translate(UNSUP) if m else ""

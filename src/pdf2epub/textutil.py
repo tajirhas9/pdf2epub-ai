@@ -28,6 +28,11 @@ _SCRIPT_RANGES: list[tuple[int, int, str]] = [
     (0x4E00, 0x9FFF, "cjk"),
 ]
 RTL_SCRIPTS = {"arabic", "hebrew"}
+
+# Footnote label at the start of a note ("1 See…", "²) …"). Not a reference that starts a
+# continued note ("1/69). We gave…", "2:185"): those digits are followed by / : , or a dash.
+NOTE_LABEL_RE = re.compile(r"^\s*(\d{1,3}|[⁰¹²³⁴⁵⁶⁷⁸⁹]{1,3})(?![\d⁰¹²³⁴⁵⁶⁷⁸⁹/:,\-–])[.)]?\s*")
+UNSUP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
 # Default BCP-47 tag per script when no language hint matches.
 SCRIPT_LANG = {
     "latin": "en",

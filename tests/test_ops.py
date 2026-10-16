@@ -1,4 +1,4 @@
-from pdf2epub.ir import BlockType, Role
+from pdf2epub.ir import BlockType, Role, Span
 from pdf2epub.llm.ops import OpApplier
 from tests.helpers import block, page
 
@@ -125,3 +125,17 @@ def test_footnote_marker_never_lost():
     assert len(refs) == 1
     before = "".join(s.text for s in b.spans[: b.spans.index(refs[0])])
     assert before.endswith("everybody.")
+
+
+def test_merge_retargets_note_markers():
+    p = page(
+        0,
+        [
+            block("a", "text", order=0),
+            block("n", "2 Historians differ", t=BlockType.FOOTNOTE, order=1),
+            block("n-cont", "1/69). We gave", t=BlockType.FOOTNOTE, order=2),
+        ],
+    )
+    p.block("a").spans.append(Span(text="2", note_ref="n-cont", sup=True))
+    assert OpApplier(p).apply({"op": "merge", "blocks": ["n", "n-cont"]}) is None
+    assert p.block("a").spans[-1].note_ref == "n"

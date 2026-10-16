@@ -378,6 +378,7 @@ async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None
     doc: Document | None = load_checkpoint(ctx)
     if doc is None:
         raise FileNotFoundError("no IR checkpoint — run `pdf2epub convert` first")
+    doc.language = doc.content_language()  # checkpoints keep the first --langs hint
     # Saved progress is valid while the pipeline hasn't rerun since (it clears it when it does).
     resumed = (read_json(ctx.ir_dir / "latest.json") or {}).get("stage") == "review-pre"
     partials = PagePartials(ctx.ir_dir, "review")

@@ -90,3 +90,27 @@ def test_split_output():
     assert _split_output(Path("books/x.epub")) == (Path("books/x.epub"), None)
     assert _split_output(Path("books")) == (None, Path("books"))
     assert _split_output(None) == (None, None)
+
+
+def test_marker_to_missing_note_is_plain_superscript(tmp_path):
+    doc = doc_two_pages()
+    doc.pages[0].blocks[1].spans[1].note_ref = "gone"
+    v1 = VuePageWriter(doc, tmp_path).render(doc.pages[0])
+    assert 'to="gone"' not in v1 and "<sup>1</sup>" in v1
+
+
+def test_note_label_ignores_continuation_reference(tmp_path):
+    doc = doc_two_pages()
+    doc.pages[1].blocks.append(block("p2-n", "1/69). We gave preference", t=BlockType.FOOTNOTE, order=5))
+    v2 = VuePageWriter(doc, tmp_path).render(doc.pages[1])
+    assert 'label=""' in v2 and ">1/69). We gave preference</Footnote>" in v2
+
+
+def test_book_language_follows_content_not_first_hint():
+    doc = doc_two_pages()
+    doc.language = "ar"  # first --langs hint
+    for p in doc.pages:
+        for b in p.blocks:
+            for s in b.spans:
+                s.lang = s.lang or "en"
+    assert doc.content_language() == "en"

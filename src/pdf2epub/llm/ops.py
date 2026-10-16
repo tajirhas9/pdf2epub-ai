@@ -216,6 +216,10 @@ class OpApplier:
             return "merge only same-type text blocks"
         first = blocks[0]
         for other in blocks[1:]:
+            for b in self.page.blocks:  # markers pointing at a merged-away note follow it
+                for sp in b.spans:
+                    if sp.note_ref == other.id:
+                        sp.note_ref = first.id
             first.spans += [Span(text=" ")] + other.spans
             first.lines += other.lines
             first.bbox = first.bbox.union(other.bbox)

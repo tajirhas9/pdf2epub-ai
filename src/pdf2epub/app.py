@@ -116,8 +116,8 @@ def convert(
         if from_stage is None or "glyphs" not in names or names.index(from_stage) <= names.index("glyphs"):
             preload_models(settings, reporter)
         doc = pipeline.run(doc, ctx, from_stage=from_stage)
-    if not settings.langs:
-        doc.language = detect_language(doc)
+    # --langs are OCR hints; the book's language (and so its page direction) is what the text is in.
+    doc.language = doc.content_language()
     write_pages(doc, ctx)
     return doc, ctx
 
@@ -317,21 +317,6 @@ def pause_text(reason: str) -> str:
         detail = reason.partition(":")[2].strip()
         return "Paused: the AI review stopped" + (f" ({detail})" if detail else "")
     return "Paused" if reason in ("", "paused") else f"Paused ({reason})"
-
-
-def detect_language(doc: Document) -> str:
-    """Book language = language of most content text (span langs come from script detection)."""
-    from collections import Counter
-
-    from pdf2epub.ir import Role
-
-    weight: Counter[str] = Counter()
-    for page in doc.pages:
-        for b in page.blocks:
-            if b.role == Role.CONTENT:
-                for s in b.spans:
-                    weight[s.lang or doc.language] += len(s.text)
-    return weight.most_common(1)[0][0] if weight else doc.language
 
 
 def write_pages(doc: Document, ctx: Context) -> dict[str, list[str]]:

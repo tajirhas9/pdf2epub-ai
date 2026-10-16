@@ -254,3 +254,14 @@ class Document(BaseModel):
             if (b := page.block(block_id)) is not None:
                 return page, b
         return None
+
+    def content_language(self) -> str:
+        """Book language = language of most content text (span langs come from script detection)."""
+        from collections import Counter
+
+        weight: Counter[str] = Counter()
+        for page in self.pages:
+            for b in page.content_blocks:
+                for s in b.spans:
+                    weight[s.lang or self.language] += len(s.text)
+        return weight.most_common(1)[0][0] if weight else self.language

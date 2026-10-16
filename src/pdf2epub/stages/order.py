@@ -6,6 +6,7 @@ import re
 
 from pdf2epub.ir import Block, BlockType, Document, Page, Role, Span
 from pdf2epub.pipeline import Context
+from pdf2epub.textutil import NOTE_LABEL_RE, UNSUP
 
 MIN_GAP = 0.006  # page fraction
 _TERMINAL = re.compile(r"[.!?:;…\"”’»)\]]\s*$")
@@ -133,8 +134,8 @@ def mark_continuations(pages: list[Page]) -> None:
 
 
 _SUP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
-_UNSUP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
-_LABEL_RE = re.compile(r"^\s*(\d{1,3}|[⁰¹²³⁴⁵⁶⁷⁸⁹]{1,3})[.)]?\s*")
+_UNSUP = UNSUP
+_LABEL_RE = NOTE_LABEL_RE
 
 
 def link_footnotes(page: Page) -> None:
@@ -144,7 +145,7 @@ def link_footnotes(page: Page) -> None:
     notes = {}
     for b in page.blocks:
         if b.type == BlockType.FOOTNOTE and b.role == Role.CONTENT and (m := _LABEL_RE.match(b.text)):
-            notes[m.group(1).translate(_UNSUP)] = b.id
+            notes.setdefault(m.group(1).translate(_UNSUP), b.id)  # a repeated label never steals a link
     if not notes:
         return
     for label, note_id in notes.items():
