@@ -282,7 +282,7 @@ def convert_and_review(
 
 
 def latest_doc(settings: Settings, book_dir: Path) -> Document | None:
-    return load_checkpoint(Context(settings=settings, book_dir=book_dir, source=Path("")))
+    return load_checkpoint(Context(settings=settings, book_dir=book_dir, source=Path()))
 
 
 def explain_error(exc: BaseException) -> tuple[str, str]:

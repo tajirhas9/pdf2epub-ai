@@ -109,7 +109,10 @@ select = [
 ignore = [
     "E501",                          # line length is the formatter's job
     "RUF001", "RUF002", "RUF003",    # ambiguous unicode: PDF text handling uses these glyphs on purpose
+    "SIM905",                        # "a b c".split() reads better than a literal list in test data
 ]
+# Keep the documented `# noqa: BLE001` catch-alls without enabling BLE (RUF100 would strip them as unused).
+external = ["BLE"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B023"]  # helper closures are called inside the loop iteration that defines them

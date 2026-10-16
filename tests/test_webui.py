@@ -115,7 +115,7 @@ def test_reporter_lists_steps_to_come():
 
     stages = (rasterize.Rasterize, layout.Layout, text.Text, running.RunningElements)
     stages += (figures.Figures, spreads.Spreads, order.ReadingOrder, glyphs.Glyphs)
-    assert PIPELINE_STEPS == tuple(s.name for s in stages)
+    assert tuple(s.name for s in stages) == PIPELINE_STEPS
     settings = Settings()
     settings.llm.enabled = False
     assert planned_steps(settings)[0] == "models" and "review" not in planned_steps(settings)

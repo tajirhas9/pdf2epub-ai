@@ -372,7 +372,7 @@ async def run_review(
 
 
 async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None, rep, pause_requested) -> dict:
-    ctx = Context(settings=settings, book_dir=book_dir, source=Path(""), pages=pages)
+    ctx = Context(settings=settings, book_dir=book_dir, source=Path(), pages=pages)
     if pause_requested is not None:
         ctx.pause_requested = pause_requested
     doc: Document | None = load_checkpoint(ctx)

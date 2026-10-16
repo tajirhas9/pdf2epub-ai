@@ -31,7 +31,7 @@ def phrase_found(phrase: str, text: str, min_ratio: float = 0.9) -> bool:
     sm.set_seq2(p)
     starts = [m.start() for m in re.finditer(re.escape(p[:6]), t)] or range(0, max(1, len(t) - n), max(1, n // 4))
     for s in starts:
-        for extra in range(0, max(4, n // 10)):  # OCR may add characters (split words)
+        for extra in range(max(4, n // 10)):  # OCR may add characters (split words)
             sm.set_seq1(t[s : s + n + extra])
             best = max(best, sm.ratio())
     return best >= min_ratio
@@ -40,7 +40,7 @@ def phrase_found(phrase: str, text: str, min_ratio: float = 0.9) -> bool:
 def epub_text(epub: Path) -> str:
     with zipfile.ZipFile(epub) as z:
         html = " ".join(z.read(n).decode() for n in z.namelist() if n.startswith("OEBPS/text/"))
-    html = re.sub(r"<(aside)[^>]*>.*?</\1>", " ", html, flags=re.S)  # footnotes counted separately
+    html = re.sub(r"<(aside)[^>]*>.*?</\1>", " ", html, flags=re.DOTALL)  # footnotes counted separately
     return re.sub(r"<[^>]+>", " ", html)
 
 

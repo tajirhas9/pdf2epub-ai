@@ -224,7 +224,7 @@ def content_edge(img: np.ndarray, y0: int, y1: int, from_right: bool, max_trim: 
     band = img[y0:y1].astype(np.float32)
     W = band.shape[1]
     limit = max(1, int(W * max_trim))
-    cols = range(W - 1, W - 1 - limit, -1) if from_right else range(0, limit)
+    cols = range(W - 1, W - 1 - limit, -1) if from_right else range(limit)
     for x in cols:
         col = band[:, x]
         if col.std() > 12 and abs(col.mean() - 255) > 8 and col.mean() > 12:
@@ -299,7 +299,7 @@ def register(
         # Seam: exact continuity at that shift (± a little), over plausible overlaps.
         seam = -1.0
         best_ov, best_dy = 0, dy
-        for ov in range(0, min(max_overlap, L.shape[1] - band)):
+        for ov in range(min(max_overlap, L.shape[1] - band)):
             sdy, ss = _best_shift(_left_profile(Lg, ov, y0, y1, band), _right_profile(Rg, ov, y0, y1, band), max_dy)
             if abs(sdy - dy) <= 2 and ss > seam + 1e-4:
                 seam, best_ov, best_dy = ss, ov, sdy

@@ -123,10 +123,8 @@ def mark_continuations(pages: list[Page]) -> None:
         last, first = _last_para(prev), _first_para(nxt)
         if not last or not first or not last.text.strip() or not first.text.strip():
             continue
-        if (
-            not _TERMINAL.search(last.text)
-            and not first.text.lstrip()[:1].isupper()
-            or last.text.rstrip().endswith("-")
+        if (not _TERMINAL.search(last.text) and not first.text.lstrip()[:1].isupper()) or last.text.rstrip().endswith(
+            "-"
         ):
             last.continues = True
             first.continued = True

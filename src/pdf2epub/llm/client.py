@@ -120,8 +120,8 @@ def _retry_after(e: Exception) -> float | None:
 
 def extract_json(raw: str) -> dict:
     """Parse the first JSON object in a model reply, tolerating think-blocks and fences."""
-    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.M).strip()
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
     try:
         value = json.loads(cleaned)
         if isinstance(value, dict):

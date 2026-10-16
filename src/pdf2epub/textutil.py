@@ -124,7 +124,7 @@ def _wordfreq():
         return None
 
 
-_WORD_RE = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)?", re.U)
+_WORD_RE = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)?", re.UNICODE)
 
 
 @lru_cache(maxsize=200_000)
@@ -162,7 +162,7 @@ def text_layer_quality(words: list[Word], lang: str = "en") -> float | None:
     if not alpha:
         return 0.0
     single = sum(1 for t in alpha if len(t) == 1 and char_script(t) == "latin" and t not in "aAI") / len(alpha)
-    junk = sum(1 for t in tokens if not any(c.isalnum() for c in t) and len(t) > 1 or any(is_pua(c) for c in t))
+    junk = sum(1 for t in tokens if (not any(c.isalnum() for c in t) and len(t) > 1) or any(is_pua(c) for c in t))
     junk /= len(tokens)
     score = (1 - min(1.0, single * 3)) * (1 - min(1.0, junk * 3))
     kr = known_ratio(alpha, lang)

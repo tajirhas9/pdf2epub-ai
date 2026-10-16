@@ -515,7 +515,7 @@ class JobRunner:
             job.status, job.reason, job.pause = "paused", e.reason, False
         except Cancelled:
             for s in job.steps:
-                if s["status"] == "running" or s["status"] == "failed" and not s["note"]:
+                if s["status"] == "running" or (s["status"] == "failed" and not s["note"]):
                     s.update(status="failed", note="stopped")
             job.status = "cancelled"
         except Exception as e:  # noqa: BLE001 - shown to the user

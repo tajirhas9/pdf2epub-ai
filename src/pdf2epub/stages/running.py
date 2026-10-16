@@ -13,7 +13,7 @@ from pdf2epub.ir import Block, BlockType, Document, Page, Role
 from pdf2epub.pipeline import Context
 
 TOP, BOTTOM, SIDE = "top", "bottom", "side"
-_NUM_RE = re.compile(r"^\W*(\d{1,4}|[ivxlcdm]{1,7})\W*$", re.I)
+_NUM_RE = re.compile(r"^\W*(\d{1,4}|[ivxlcdm]{1,7})\W*$", re.IGNORECASE)
 
 
 def zone(b: Block) -> str | None:
