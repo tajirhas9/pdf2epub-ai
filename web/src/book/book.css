@@ -18,6 +18,11 @@ h1, h2, h3, h4, h5, h6 {
 h1 { font-size: 1.8em; margin: 1.2em 0 0.6em; }
 h2 { font-size: 1.4em; margin: 1em 0 0.5em; }
 h3 { font-size: 1.15em; margin: 1em 0 0.4em; }
+/* Chapter and section headings start a new reader page (set by codegen). */
+h1.newpage, h2.newpage {
+  page-break-before: always;
+  break-before: page;
+}
 
 p {
   margin: 0;

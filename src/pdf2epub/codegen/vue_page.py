@@ -92,6 +92,7 @@ class VuePageWriter:
 
         captions = {b.caption_of: b for b in blocks if b.type == BlockType.CAPTION and b.caption_of}
         notes: list[Block] = []
+        prev_block = _last_body_block(prev) if prev else None
         for i, b in enumerate(blocks):
             if i == 0 and continued_from_prev:
                 continue  # emitted by the previous page, inside its last paragraph
@@ -100,7 +101,8 @@ class VuePageWriter:
             elif b.type == BlockType.CAPTION and b.caption_of in {x.id for x in blocks}:
                 continue
             else:
-                lines.append(self._block(b, page, captions))
+                lines.append(self._block(b, page, captions, prev_block))
+                prev_block = b
         if notes:
             lines.append('<section class="notes">')
             lines.extend(
@@ -117,11 +119,17 @@ class VuePageWriter:
 
     # ---- blocks -------------------------------------------------------------------------
 
-    def _block(self, b: Block, page: Page, captions: dict[str, Block]) -> str:
+    def _block(self, b: Block, page: Page, captions: dict[str, Block], prev: Block | None = None) -> str:
         bid = f' bid="{esc_attr(b.id)}"'
         if b.type in (BlockType.TITLE, BlockType.HEADING):
-            level = 1 if b.type == BlockType.TITLE else (b.level or 2)
-            return f'<BookHeading :level="{level}"{bid}{_lang_attrs(b)}>{self._inline(b.spans, b)}</BookHeading>'
+            level = _heading_level(b)
+            # Chapter titles and section headings open a new reader page, unless they directly
+            # follow another heading (title + subtitle, chapter + first section stay together).
+            newpage = " newpage" if level <= 2 and not (prev and _heading_level(prev)) else ""
+            return (
+                f'<BookHeading :level="{level}"{bid}{newpage}{_lang_attrs(b)}>'
+                f"{self._inline(b.spans, b)}</BookHeading>"
+            )
         if b.type in (BlockType.FIGURE, BlockType.TABLE, BlockType.FORMULA) and b.image:
             cap = captions.get(b.id)
             caption = self._inline(cap.spans, cap) if cap else ""
@@ -250,6 +258,21 @@ def is_hand_edited(path: Path) -> bool:
 def _last_para(page: Page) -> Block | None:
     paras = [b for b in page.content_blocks if b.type == BlockType.PARAGRAPH]
     return paras[-1] if paras else None
+
+
+def _heading_level(b: Block) -> int:
+    """Rendered heading level, 0 for non-headings."""
+    if b.type == BlockType.TITLE:
+        return 1
+    if b.type == BlockType.HEADING:
+        return b.level or 2
+    return 0
+
+
+def _last_body_block(page: Page) -> Block | None:
+    """Last block rendered in the page body (footnotes go to the notes section)."""
+    body = [b for b in page.content_blocks if b.type != BlockType.FOOTNOTE]
+    return body[-1] if body else None
 
 
 def _block_lang(b: Block) -> str | None:

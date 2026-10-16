@@ -114,3 +114,28 @@ def test_book_language_follows_content_not_first_hint():
             for s in b.spans:
                 s.lang = s.lang or "en"
     assert doc.content_language() == "en"
+
+
+def test_section_headings_start_new_page(tmp_path):
+    p1 = page(
+        0,
+        [
+            block("t", "Chapter One", t=BlockType.TITLE, order=0),
+            block("s1", "First Section", t=BlockType.HEADING, level=2, order=1),
+            block("a", "Body.", order=2),
+            block("s2", "Second Section", t=BlockType.HEADING, level=2, order=3),
+            block("s2a", "Sub", t=BlockType.HEADING, level=3, order=4),
+            block("b", "More.", order=5),
+            block("s3", "Third Section", t=BlockType.HEADING, level=2, order=6),
+        ],
+    )
+    p2 = page(1, [block("s4", "Fourth Section", t=BlockType.HEADING, level=2, order=0)])
+    doc = Document(id="t", source="x.pdf", title="T", pages=[p1, p2])
+    w = VuePageWriter(doc, tmp_path)
+    v1 = w.render(p1)
+    assert '<BookHeading :level="1" bid="t" newpage>' in v1
+    assert '<BookHeading :level="2" bid="s1">' in v1  # directly under the chapter title
+    assert '<BookHeading :level="2" bid="s2" newpage>' in v1
+    assert '<BookHeading :level="3" bid="s2a">' in v1  # subsections stay inline
+    # previous page ended with a heading: keep them together
+    assert '<BookHeading :level="2" bid="s4">' in w.render(p2)
