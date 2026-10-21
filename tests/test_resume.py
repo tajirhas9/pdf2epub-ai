@@ -222,11 +222,16 @@ def test_resume_needs_the_same_file_and_options(tmp_path, fake_convert):
 
 
 class FakeClient:
+    usage: dict = {}
+
     def __init__(self, *a, **k): ...
 
     async def ping(self): ...
 
     async def close(self): ...
+
+    def usage_summary(self):
+        return ""
 
 
 class FakeWriter:

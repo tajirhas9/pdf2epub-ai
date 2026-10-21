@@ -43,13 +43,25 @@ OPS_SCHEMA: dict = {
     "required": ["verdict", "ops"],
 }
 
+
+def ops_schema(edit_op: bool = False) -> dict:
+    """OPS_SCHEMA, optionally offering the find/replace "edit" op (small text fixes without re-sending the block)."""
+    if not edit_op:
+        return OPS_SCHEMA
+    item = OPS_SCHEMA["properties"]["ops"]["items"]
+    props = dict(item["properties"], op={"type": "string", "enum": OPS + ["edit"]})
+    props |= {"find": {"type": "string"}, "replace": {"type": "string"}}
+    ops = {"type": "array", "items": {**item, "properties": props}}
+    return {**OPS_SCHEMA, "properties": {**OPS_SCHEMA["properties"], "ops": ops}}
+
+
 MIN_SIMILARITY = 0.55  # fix_text must stay this close to the current text (unless text is untrustworthy)
 
 
 @dataclass
 class OpResult:
     op: dict
-    status: str  # applied | rejected
+    status: str  # applied | rejected | skipped (the op would change nothing)
     reason: str = ""
 
 
@@ -70,6 +82,9 @@ class OpApplier:
         for op in ops:
             if not isinstance(op, dict):
                 continue
+            if self._unchanged(op):
+                results.append(OpResult(op, "skipped"))
+                continue
             try:
                 reason = self.apply(op)
                 results.append(OpResult(op, "rejected" if reason else "applied", reason or ""))
@@ -86,6 +101,31 @@ class OpApplier:
         return handler(op)
 
     # ---- helpers ------------------------------------------------------------------------
+
+    def _unchanged(self, op: dict) -> bool:
+        """The op restates the current value. (An unchanged fix_text is not one: it confirms the text and
+        clears the low-confidence flags.)"""
+        kind = op.get("op")
+        if kind == "reorder":
+            content = sorted((b for b in self.page.blocks if b.role == Role.CONTENT), key=lambda b: b.order)
+            return op.get("blocks") == [b.id for b in content] and [b.order for b in content] == list(
+                range(len(content))
+            )
+        b = self.page.block(op["block"]) if isinstance(op.get("block"), str) else None
+        if b is None:
+            return False
+        if kind == "set_role":
+            return op.get("role") == b.role.value
+        if kind == "set_type":
+            same_level = b.type != BlockType.HEADING or (bool(b.level) and op.get("level") in (None, b.level))
+            return op.get("type") == b.type.value and same_level
+        if kind == "set_layout":
+            return b.layout is not None and op.get("layout") == b.layout.value
+        if kind == "alt_text":
+            return bool(b.alt) and (op.get("text") or "").strip() == b.alt
+        if kind == "edit":
+            return isinstance(op.get("find"), str) and op.get("find") == op.get("replace")
+        return False
 
     def _block(self, op: dict) -> Block | str:
         bid = op.get("block")
@@ -135,6 +175,24 @@ class OpApplier:
         b.source = Source.LLM
         b.flags = [f for f in b.flags if f not in ("low-confidence", "no-text")]
         return None
+
+    def _op_edit(self, op: dict) -> str | None:
+        """Small fix: replace one exact, unique piece of the block text. The result goes through every
+        fix_text check (similarity, length, locked marks, inserted marks, footnote markers)."""
+        b = self._block(op)
+        if isinstance(b, str):
+            return b
+        find, replace = op.get("find"), op.get("replace")
+        if not isinstance(find, str) or not find or not isinstance(replace, str):
+            return "edit needs non-empty find and a replace string"
+        if "⟦" in find + replace or "⟧" in find + replace:
+            return "verified marks ⟦g:…⟧ cannot be edited"
+        old = payload_text(b)
+        count = old.count(find)
+        if count != 1:
+            return f"find text occurs {count} times in the block (must be exactly once)"
+        fix = {"op": "fix_text", "block": b.id, "text": old.replace(find, replace, 1)}
+        return self._op_fix_text(fix | {k: op[k] for k in ("lang", "dir") if op.get(k)})
 
     def _op_set_role(self, op: dict) -> str | None:
         b = self._block(op)

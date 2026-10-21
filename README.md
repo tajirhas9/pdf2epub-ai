@@ -1,22 +1,125 @@
-# pdf2epub-ai
+<p align="center">
+  <img src="docs/assets/title.svg" alt="pdf2epub-ai" width="640">
+</p>
 
-Convert PDFs (born-digital or scanned) into **reflowable EPUB 3** books. Fast deterministic vision
-tools do most of the work; an optional vision LLM (any OpenAI-compatible API, local or cloud) checks
-each page against its image and fixes what they missed. Use it **in the browser** (`pdf2epub ui`) or
-**from the terminal** (`pdf2epub run`).
+<p align="center">
+  <b>Turn any PDF, digital or scanned, into a clean, reflowable EPUB&nbsp;3.</b><br>
+  Fast vision tools do the heavy lifting; an optional vision LLM checks every page against the original.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: PolyForm Noncommercial 1.0.0" src="https://img.shields.io/badge/license-PolyForm%20NC%201.0.0-7c3aed"></a>
+  <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-3776ab?logo=python&logoColor=white">
+  <img alt="Node.js 22.12+" src="https://img.shields.io/badge/node-%E2%89%A522.12-339933?logo=nodedotjs&logoColor=white">
+  <img alt="Linux, macOS, Windows" src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-informational">
+  <a href="CONTRIBUTING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-ec4899"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#sample-conversions">Samples</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#tutorial-web-app">Web app</a> ·
+  <a href="#tutorial-command-line">Command line</a> ·
+  <a href="#connecting-an-ai-model">AI models</a> ·
+  <a href="#contributing">Contributing</a>
+</p>
+
+---
+
+## Why pdf2epub-ai
+
+Convert PDFs (born-digital or scanned) into **reflowable EPUB 3** books that read well on a phone,
+tablet or e-reader. Fast deterministic vision tools do most of the work; an optional vision LLM (any
+OpenAI-compatible API, local or cloud) checks each page against its image and fixes what they missed.
+Use it **in the browser** (`pdf2epub ui`) or **from the terminal** (`pdf2epub run`).
 
 Built for the cases other converters get wrong:
 
-- pictures placed anywhere, text wrapping around them
-- a picture printed across **two facing pages** (spread), incl. scans that lost the gutter
-- **mixed scripts** (e.g. English with Arabic verses, inline honorific glyphs)
-- running headers/footers, page numbers, decorative side tabs and background photos leaking into text
-- scanned books whose hidden OCR layer is poor (`M uham m ad`, `com plete`)
+| the problem | what pdf2epub-ai does |
+|---|---|
+| pictures placed anywhere, text wrapping around them | detects the page layout first, keeps pictures and captions in reading order |
+| a picture printed across **two facing pages** (spread), incl. scans that lost the gutter | registers both halves and stitches them only when the seam provably matches; otherwise the LLM decides |
+| **mixed scripts** (e.g. English with Arabic verses, inline honorific glyphs) | OCR per line with the right script model, `lang`/`dir` on RTL runs, embedded fonts |
+| running headers/footers, page numbers, side tabs and background photos leaking into text | removed, with print page numbers kept as EPUB page-list markers |
+| scanned books whose hidden OCR layer is poor (`M uham m ad`, `com plete`) | treats the hidden layer as a hint only and re-reads the page |
 
-**Contents** · [Install](#install) · [Quick start](#quick-start) · [Tutorial: web app](#tutorial-web-app) ·
-[Tutorial: command line](#tutorial-command-line) · [Connecting an AI model](#connecting-an-ai-model) ·
-[Configuration](#configuration) · [Troubleshooting](#troubleshooting) ·
-[Update & uninstall](#update--uninstall) · [How it works](#how-it-works) · [Development](#development)
+## Features
+
+- **Two ways to use it** — a browser app with guided setup, a queue and pause/resume, or a
+  scriptable CLI with live progress.
+- **Hardware-aware OCR** — PaddleOCR with the CUDA build matching your NVIDIA driver (or CPU), and
+  Apple's Vision framework on the Neural Engine on a Mac.
+- **Optional AI page review** — any OpenAI-compatible vision model (llama.cpp, LM Studio, Ollama,
+  OpenAI, Gemini, OpenRouter, DeepSeek…) compares every page with the original and returns
+  *validated edit operations*. It never writes markup or invents text.
+- **Real EPUB 3** — chapters instead of PDF pages, linked footnotes, print page numbers, embedded
+  fonts for scripts readers often lack, validated with epubcheck.
+- **Resumable** — progress is saved after every page; pause, lose power or lose the AI server and
+  carry on later.
+- **Runs anywhere** — Linux, macOS, Windows (native or WSL2), or one Docker image with GPU support.
+
+## Sample conversions
+
+Scanned 1914 magazine pages, as a phone shows the first screen of each EPUB page. The middle column
+is the fast pipeline alone (`--no-llm`); the right column adds the AI page review with a small, heavily
+quantized local model on llama.cpp.
+
+<p align="center">
+  <img src="docs/assets/samples/sciam-war-supply.png" alt="Scanned Scientific American page next to its EPUB rendering, without and with AI review: the AI-reviewed text replaces garbled OCR with readable sentences" width="100%">
+</p>
+
+**Garbled OCR, rewritten from the scan.** The scan's poor print gives lines like
+*"No boot news man wonld aderenke a new enter per se vided"*. The review reads the page image and
+restores *"No business man would undertake a new enterprise without first preparing a scheme"*.
+
+<p align="center">
+  <img src="docs/assets/samples/sciam-aircraft.png" alt="Scanned Scientific American page about aircraft next to its EPUB rendering, without and with AI review: OCR noise in the caption and first paragraph is fixed" width="100%">
+</p>
+
+**Caption and opening fixed.** *"le nv ing the great airship"* becomes *"leaving the great airship"*,
+and *"AM. eyos are tarned upward"* becomes *"All eyes are turned upward"*.
+
+<sub>Pages from *Scientific American*, 5 September 1914 (public domain), digitized by the
+[Internet Archive](https://archive.org/details/sim_scientific-american_1914-09-05_111_10).
+Rebuild these images with `scripts/readme_samples.py`.</sub>
+
+## Quick start
+
+```bash
+# needs uv (https://docs.astral.sh/uv/) and Node.js 22.12+, see Install for details
+uv tool install --python 3.11 "pdf2epub @ git+https://github.com/tajirhas9/pdf2epub-ai"
+```
+
+**In the browser**
+
+```bash
+pdf2epub ui
+```
+
+Follow the setup (about a minute), drop a PDF on the page, press **Convert to EPUB**, then
+**Download EPUB**.
+
+**In the terminal**
+
+```bash
+pdf2epub init                      # once: AI model (or none), API key, default languages and folder
+pdf2epub run book.pdf              # → book.epub in the current folder
+pdf2epub run book.pdf --no-llm     # fastest: no AI review (fine for clean digital PDFs)
+```
+
+## Contents
+
+- [Install](#install) — requirements, step by step, [Docker](#docker)
+- [Tutorial: web app](#tutorial-web-app) — first-run setup, converting a book
+- [Tutorial: command line](#tutorial-command-line) — `run`, step by step with the workbench, [all commands](#all-commands)
+- [Connecting an AI model](#connecting-an-ai-model) — providers, keys, tips for local models
+- [Configuration](#configuration) — config file, environment variables, where files live
+- [Pause & resume](#pause--resume)
+- [Troubleshooting](#troubleshooting)
+- [Update & uninstall](#update--uninstall)
+- [How it works](#how-it-works)
+- [Development](#development) · [Contributing](#contributing) · [License](#license)
 
 ---
 
@@ -72,11 +175,16 @@ nothing to download, and on Apple silicon it runs on the Neural Engine (~0.3 s p
 Hebrew…) still go to PaddleOCR, and page layout always uses Paddle. Switch with
 `pdf2epub config set ocr_engine paddle` (or `apple` / `auto`), `--ocr-engine` per run, or in Settings.
 
+<details>
+<summary>Other install options: pick the Paddle build yourself, PyPI, wheels</summary>
+
 Prefer to choose yourself? The extras still work: `"pdf2epub[cpu] @ …"`, or `"pdf2epub[gpu] @ …"` with
 `--index paddle=https://www.paddlepaddle.org.cn/packages/stable/cu129/ --index-strategy unsafe-best-match`.
 Once it is on PyPI the shorter form works: `uv tool install --python 3.11 pdf2epub`.
 From a downloaded or self-built wheel: `uv tool install --python 3.11 "pdf2epub-0.1.0-py3-none-any.whl"`
 (build one with `uv build --wheel` in a checkout).
+
+</details>
 
 ### Step 3 — check it
 
@@ -86,6 +194,9 @@ pdf2epub ui          # opens the web app; its first-run setup checks everything 
 ```
 
 ### Docker
+
+<details>
+<summary>Build and run the image</summary>
 
 Everything included (Python, Paddle, Node, Java, browser). GPU via `--gpus all`
 ([NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/) needed).
@@ -110,26 +221,7 @@ between runs. To reach an LLM server on the host use `http://host.docker.interna
 local servers reject that host name with HTTP 403 until it is added to their allowed hosts;
 `pdf2epub llm-check` shows the server's message).
 
----
-
-## Quick start
-
-**In the browser**
-
-```bash
-pdf2epub ui
-```
-
-Follow the setup (about a minute), drop a PDF on the page, press **Convert to EPUB**, then
-**Download EPUB**.
-
-**In the terminal**
-
-```bash
-pdf2epub init                      # once: AI model (or none), API key, default languages and folder
-pdf2epub run book.pdf              # → book.epub in the current folder
-pdf2epub run book.pdf --no-llm     # fastest: no AI review (fine for clean digital PDFs)
-```
+</details>
 
 ---
 
@@ -280,6 +372,7 @@ pdf2epub build -o ~/Books                         # EPUB + validation, then clea
 | `pdf2epub build` | make and validate the EPUB |
 | `pdf2epub init` | first-run setup in the terminal |
 | `pdf2epub llm-check` | test the AI model connection |
+| `pdf2epub install-paddle` | install the best PaddlePaddle build (OCR engine) for this computer |
 | `pdf2epub config show/set/unset/path` | view and change settings |
 | `pdf2epub clean` | delete intermediate files |
 | `pdf2epub uninstall` | remove models, caches, settings and the stored API key |
@@ -353,6 +446,9 @@ concurrency = 4
 reasoning_effort = "low"
 ```
 
+<details>
+<summary>All settings and their environment variables</summary>
+
 | setting | env variable | default | meaning |
 |---|---|---|---|
 | `langs` | `PDF2EPUB_LANGS` | auto | language hints, e.g. `["en","ar"]` |
@@ -374,6 +470,8 @@ reasoning_effort = "low"
 | `llm.extra_body` | `LLM_EXTRA_BODY` | `{}` | provider-specific request fields (JSON) |
 | `llm.extra_headers` | `LLM_EXTRA_HEADERS` | `{}` | extra HTTP headers (JSON) |
 | `llm.json_mode` | `LLM_JSON_MODE` | auto | `auto` · `json_schema` · `json_object` · `prompt` |
+
+</details>
 
 Where files live:
 
@@ -477,9 +575,7 @@ uv run pdf2epub llm-check
 ```
 
 Everything heavy lives inside the project (`.venv`, `.cache`, `web/node_modules`, `work/`); in a
-checkout prefix commands with `uv run`. Plain `uv run pdf2epub ui` works too: Paddle is installed on first use.
-`uv sync` removes it again (it is not in the lockfile, since the right build depends on the
-hardware); the next `uv run pdf2epub …` puts it back, or run `uv run pdf2epub install-paddle`.
+checkout prefix commands with `uv run`.
 
 ```bash
 uv run pytest                 # unit + end-to-end (synthetic PDF → EPUB → epubcheck) + web backend
@@ -488,15 +584,41 @@ cd web && npm run typecheck
 uv run pdf2epub eval          # corpus evaluation, flags regressions vs the previous run (eval/README.md)
 ```
 
-Web app development: in a checkout `pdf2epub ui` rebuilds the page whenever `web/src/ui` changes
-(about 2 s). For hot reload run `pdf2epub ui` once to get the access cookie, then
-`cd web && npm run dev:ui` (proxies `/api` to it; `PDF2EPUB_API` changes the target).
+Web-app hot reload, release builds, the Paddle/`uv sync` interplay and the project rules are in
+[CONTRIBUTING.md](CONTRIBUTING.md#development-setup).
 
-Releases: `uv build --wheel` builds the web app into the wheel (`hatch_build.py`, needs Node at build
-time; `PDF2EPUB_REQUIRE_UI_BUILD=1` makes a missing Node an error instead of a warning).
+---
 
-Heuristics and prompts must stay generic: the sample PDF documents failure *classes*. Add more
-documents to `eval/corpus/` and keep `pdf2epub eval` free of regressions when tuning.
+## Contributing
+
+Contributions are welcome: bug reports, test documents that break the converter, docs and code.
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks and the pull-request flow.
+- Commits are signed off (`git commit -s`), and contributions come with a
+  [license grant](CONTRIBUTING.md#licensing-of-contributions) to the project owner.
+- Be kind: [Code of Conduct](CODE_OF_CONDUCT.md).
+- Found a security problem? Report it privately, see [SECURITY.md](SECURITY.md).
+
+## License
+
+pdf2epub-ai is **source-available** under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+
+- ✅ Free for **noncommercial** use: personal projects, hobby, study, research, education, and use by
+  charities, schools, public research and government bodies.
+- ✅ You may modify it and share your changes under the same license (keep the `Required Notice`).
+- ❌ **Commercial use needs written permission.** For a commercial license, contact
+  [tajircuet@gmail.com](mailto:tajircuet@gmail.com) or [tajirhasnain.com](https://tajirhasnain.com).
+
+The license text is authoritative; this summary is not legal advice.
+
+## Acknowledgements
+
+pdf2epub-ai builds on [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) (Apache-2.0),
+[PyMuPDF](https://github.com/pymupdf/PyMuPDF) (AGPL-3.0), Apple's
+[Vision](https://developer.apple.com/documentation/vision) framework, [Vue](https://vuejs.org) and
+[Vite](https://vite.dev) (MIT), [epubcheck](https://github.com/w3c/epubcheck) (BSD-3-Clause) and the
+[Amiri](https://github.com/aliftype/amiri) font (OFL-1.1). Each keeps its own license.
+Sample pages are from public-domain magazines digitized by the [Internet Archive](https://archive.org).
 
 ---
 

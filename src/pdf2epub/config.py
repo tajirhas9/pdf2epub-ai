@@ -110,6 +110,23 @@ class LLMSettings(BaseSettings):
     # "auto" probes json_schema -> json_object -> prompt-only on first failure.
     json_mode: str = "auto"
     review_policy: str = "flagged"  # "flagged" | "all" | "none"
+    # Leaner page-review requests (fewer tokens = faster on local servers, cheaper on cloud ones).
+    # Defaults keep the original requests until the A/B quality check (eval/) shows no loss.
+    review_payload: Literal["json", "lines"] = "json"  # page blocks as JSON objects or one line each
+    review_edit_op: bool = False  # offer the find/replace "edit" op for small text fixes
+    review_renders: Literal["all", "when-useful"] = "all"  # phone render on every page or only where layout matters
+    review_crops: Literal["zoom", "lean"] = "zoom"  # block crops: always zoomed to 900 px, or only small ones, ≤2×
+    # Model "thinking" for page review / glyph checks: "default" sends nothing (provider default); "off" / "low"
+    # are mapped per provider (DeepSeek thinking switch, reasoning_effort, llama.cpp enable_thinking).
+    # Thinking tokens are billed as output and are most of a thinking model's time. llm.extra_body still wins.
+    reasoning: Literal["default", "off", "low"] = "default"
+    glyph_reasoning: Literal["default", "off", "low"] = "default"
+    # Which kind of OpenAI-compatible server this is (pdf2epub.llm.servers): decides the optional
+    # server-specific fields sent. "auto" detects it from the host and the server's /props.
+    server: Literal["auto", "openai", "deepseek", "llamacpp", "strata", "local"] = "auto"
+    # Ask the server to keep the shared system prompt cached between requests, when it has a way
+    # to be asked (llama.cpp, Strata). "off" sends no such fields.
+    prompt_cache: Literal["auto", "off"] = "auto"
     enabled: bool = True
 
     @classmethod

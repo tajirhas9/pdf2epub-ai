@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 190" width="900" height="190" role="img" aria-label="pdf2epub-ai">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0.25">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="0.38" stop-color="#9333ea"/>
+      <stop offset="0.7" stop-color="#ec4899"/>
+      <stop offset="1" stop-color="#f59e0b"/>
+    </linearGradient>
+    <linearGradient id="u" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4f46e5" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#9333ea" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#f59e0b" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="glow" x="-10%" y="-40%" width="120%" height="180%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+  </defs>
+  <style>
+    .t { font: 800 104px -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif; letter-spacing: -3px; }
+    .s { font: 500 25px -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif; letter-spacing: 0.5px; }
+  </style>
+  <text x="450" y="112" text-anchor="middle" class="t" fill="url(#g)" opacity="0.35" filter="url(#glow)">pdf2epub-ai</text>
+  <text x="450" y="112" text-anchor="middle" class="t" fill="url(#g)">pdf2epub-ai</text>
+  <rect x="250" y="134" width="400" height="3" rx="1.5" fill="url(#u)"/>
+  <text x="450" y="174" text-anchor="middle" class="s" fill="#8b949e">PDF in. Reflowable EPUB&#160;3 out.</text>
+</svg>

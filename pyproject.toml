@@ -2,6 +2,8 @@
 name = "pdf2epub"
 version = "0.1.0"
 description = "LLM-assisted PDF to reflowable EPUB3 converter"
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
 authors = [
     { name = "Syed Tajir Hasnain", email = "tajircuet@gmail.com" }
 ]

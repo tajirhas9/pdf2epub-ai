@@ -12,10 +12,10 @@ from pathlib import Path
 from PIL import Image
 
 from pdf2epub.codegen.vue_page import VuePageWriter
-from pdf2epub.config import Settings
+from pdf2epub.config import LLMSettings, Settings
 from pdf2epub.ir import BlockType, Document, Page, Role
 from pdf2epub.llm.client import ImagePart, LLMError, LLMUnavailable, OpenAICompatClient
-from pdf2epub.llm.ops import OPS_SCHEMA, OpApplier, payload_text
+from pdf2epub.llm.ops import OpApplier, ops_schema, payload_text
 from pdf2epub.pipeline import Context, load_checkpoint, save_checkpoint
 from pdf2epub.resume import PagePartials, Paused, atomic_write_text, read_json
 from pdf2epub.stages.order import mark_continuations
@@ -23,6 +23,15 @@ from pdf2epub.stages.order import mark_continuations
 _log = logging.getLogger(__name__)
 FAILURES_FILE = "review-failures.json"  # in book_dir/llm: {"<page no>": "<why the LLM call failed>"}
 SYSTEM = resources.files("pdf2epub.llm.prompts").joinpath("page_review.md").read_text()
+EDIT_OP_NOTE = (
+    '\nSmall text fixes: {"op":"edit","block":ID,"find":EXACT_TEXT,"replace":NEW_TEXT}. "find" is copied from the '
+    "block text and must occur exactly once in it: the wrong word(s) plus a little context, not the whole block. "
+    "Use fix_text only when the block is empty or most of it changes.\n"
+)
+LINES_NOTE = (
+    "\nThe current blocks come one per line: ID TYPE ROLE #ORDER [x0,y0,x1,y1] layout=… flags=… | TEXT "
+    "(#ORDER only for content blocks; layout and flags only when set).\n"
+)
 SPREAD_SYSTEM = resources.files("pdf2epub.llm.prompts").joinpath("spread_check.md").read_text()
 GLYPH_SYSTEM = resources.files("pdf2epub.llm.prompts").joinpath("glyph_resolve.md").read_text()
 GLYPH_SCHEMA = {
@@ -47,6 +56,7 @@ SPREAD_SCHEMA = {
     },
     "required": ["same_picture", "confidence", "reason"],
 }
+LEAN_CROP_MAX_AREA = 0.35  # review_crops="lean": no crop of blocks larger than this page fraction
 CROP_FLAGS = {"needs-transcription", "low-confidence", "rtl", "no-text", "layout-missed", "figure-text"}
 
 
@@ -59,6 +69,44 @@ def needs_review(page: Page, policy: str) -> bool:
         page.flags
         or any(b.flags for b in page.blocks)
         or any(b.type == BlockType.FIGURE and b.role == Role.CONTENT for b in page.blocks)
+    )
+
+
+def review_system(llm: LLMSettings) -> str:
+    """System prompt of the page review for these settings (the original one by default)."""
+    system = SYSTEM
+    if llm.review_payload == "lines":
+        system += LINES_NOTE
+    if llm.review_edit_op:
+        system += EDIT_OP_NOTE
+    return system
+
+
+def page_text(page: Page, llm: LLMSettings) -> str:
+    """The page's current blocks as sent to the model."""
+    if llm.review_payload != "lines":
+        return "Current interpretation of this page:\n" + json.dumps(page_payload(page), ensure_ascii=False)
+    lines = [f"Current blocks of page {page.label or page.index + 1}:"]
+    for b in sorted(page.blocks, key=lambda b: (b.role != Role.CONTENT, b.order)):
+        head = [b.id, b.type.value, b.role.value]
+        if b.role == Role.CONTENT:
+            head.append(f"#{b.order}")
+        box = (b.bbox.x0, b.bbox.y0, b.bbox.x1, b.bbox.y1)
+        head.append("[" + ",".join(f"{v:.3f}".rstrip("0").rstrip(".") or "0" for v in box) + "]")
+        if b.layout:
+            head.append(f"layout={b.layout.value}")
+        if b.flags:
+            head.append("flags=" + ",".join(b.flags))
+        lines.append(" ".join(head) + " | " + payload_text(b))
+    return "\n".join(lines)
+
+
+def wants_render(page: Page) -> bool:
+    """Pages where the phone rendering can change a decision: figures/tables placement, missed layout."""
+    visual = (BlockType.FIGURE, BlockType.TABLE, BlockType.FORMULA)
+    return any(
+        (b.type in visual and b.role == Role.CONTENT) or {"layout-missed", "figure-text"} & set(b.flags)
+        for b in page.blocks
     )
 
 
@@ -82,7 +130,7 @@ def page_payload(page: Page) -> dict:
 
 
 def page_images(
-    page: Page, book_dir: Path, max_images: int, max_side: int, render: Path | None = None
+    page: Page, book_dir: Path, max_images: int, max_side: int, render: Path | None = None, crops: str = "zoom"
 ) -> list[ImagePart]:
     with Image.open(book_dir / page.image.path) as im:
         img = im.convert("RGB")
@@ -90,9 +138,12 @@ def page_images(
     if render is not None and render.exists() and max_images > 2:
         parts.append(ImagePart.from_path(render, "current EPUB rendering on a phone (first screen)", max_side))
     W, H = img.size
-    crops = [b for b in page.blocks if b.role == Role.CONTENT and CROP_FLAGS & set(b.flags)]
-    crops.sort(key=lambda b: ("needs-transcription" not in b.flags, b.confidence))
-    for b in crops[: max(0, max_images - 1)]:
+    lean = crops == "lean"
+    picked = [b for b in page.blocks if b.role == Role.CONTENT and CROP_FLAGS & set(b.flags)]
+    if lean:  # a block covering much of the page is already legible in the page image
+        picked = [b for b in picked if (b.bbox.x1 - b.bbox.x0) * (b.bbox.y1 - b.bbox.y0) <= LEAN_CROP_MAX_AREA]
+    picked.sort(key=lambda b: ("needs-transcription" not in b.flags, b.confidence))
+    for b in picked[: max(0, max_images - 1)]:
         pad = 0.01
         box = (
             round(max(0, b.bbox.x0 - pad) * W),
@@ -101,7 +152,10 @@ def page_images(
             round(min(1, b.bbox.y1 + pad) * H),
         )
         crop = img.crop(box)
-        if crop.width < 900:  # zoom small crops so thin strokes/diacritics are legible
+        if lean and crop.width < 450:  # zoom only small crops, at most 2x
+            f = min(2.0, 900 / crop.width)
+            crop = crop.resize((round(crop.width * f), round(crop.height * f)), Image.LANCZOS)
+        elif not lean and crop.width < 900:  # zoom small crops so thin strokes/diacritics are legible
             f = 900 / crop.width
             crop = crop.resize((round(crop.width * f), round(crop.height * f)), Image.LANCZOS)
         parts.append(ImagePart.from_pil(crop, f"block {b.id}", max_side))
@@ -132,19 +186,22 @@ async def review_page(
     client: OpenAICompatClient, page: Page, settings: Settings, book_dir: Path, renderer=None
 ) -> list[dict]:
     render = None
-    if renderer is not None:
+    llm = settings.llm
+    if renderer is not None and (llm.review_renders == "all" or wants_render(page)):
         xhtml = book_dir / "build" / "pages" / f"p{page.index + 1:04d}.xhtml"
         if xhtml.exists():
             try:
                 render = await renderer.render(xhtml)
             except Exception:  # rendering is an aid, never a blocker
                 render = None
-    images = page_images(page, book_dir, settings.llm.max_images_per_call, settings.llm.image_max_side, render)
-    text = "Current interpretation of this page:\n" + json.dumps(page_payload(page), ensure_ascii=False)
-    reply = await client.complete_json(SYSTEM, text, images, OPS_SCHEMA, "page_review")
+    images = page_images(page, book_dir, llm.max_images_per_call, llm.image_max_side, render, llm.review_crops)
+    schema = ops_schema(llm.review_edit_op)
+    reply = await client.complete_json(review_system(llm), page_text(page, llm), images, schema, "page_review")
     ops = reply.get("ops") if isinstance(reply.get("ops"), list) else []
     log = []
     for r in OpApplier(page).apply_all(ops):
+        if r.status == "skipped":
+            continue
         log.append({"page": page.index + 1, "status": r.status, "reason": r.reason, "op": r.op})
     page.flags = [f for f in page.flags if not f.startswith("review")] + [f"review:{reply.get('verdict', '?')}"]
     return log
@@ -161,6 +218,7 @@ async def resolve_glyphs(client: OpenAICompatClient, doc: Document, settings: Se
     from pdf2epub.stages.glyphs import refresh_glyph_spans
 
     log = []
+    jobs = []  # (glyph, page, request); sent together, applied in book order
     for g in doc.glyphs.values():
         if g.resolved or not g.image or g.sample_bbox is None:
             continue
@@ -183,17 +241,13 @@ async def resolve_glyphs(client: OpenAICompatClient, doc: Document, settings: Se
         mark = mark.resize((mark.width * f, mark.height * f), Image.LANCZOS)
         context = context.resize((context.width * 3, context.height * 3), Image.LANCZOS)
         ocr = "nothing (OCR missed it)" if g.symbol == PLACEHOLDER else repr(g.symbol)
-        try:
-            reply = await client.complete_json(
-                GLYPH_SYSTEM,
-                f"OCR read this mark as: {ocr}",
-                [ImagePart.from_pil(mark, "the mark (zoomed)"), ImagePart.from_pil(context, "the line around it")],
-                GLYPH_SCHEMA,
-                "glyph_resolve",
-            )
-        except LLMUnavailable:
-            raise
-        except LLMError as e:
+        images = [ImagePart.from_pil(mark, "the mark (zoomed)"), ImagePart.from_pil(context, "the line around it")]
+        request = (GLYPH_SYSTEM, f"OCR read this mark as: {ocr}", images, GLYPH_SCHEMA, "glyph_resolve")
+        jobs.append((g, page, (*request, settings.llm.glyph_reasoning)))
+    replies = await _complete_all(client, [job[2] for job in jobs], settings.llm.concurrency)
+    for (g, page, _), reply in zip(jobs, replies, strict=True):
+        if isinstance(reply, LLMError):
+            e = reply
             log.append(
                 {"page": page.index + 1, "status": "rejected", "reason": f"glyph {g.key}: {e}", "op": {"op": "glyph"}}
             )
@@ -269,6 +323,30 @@ async def verify_inserted_marks(
             }
         )
     return log
+
+
+async def _complete_all(client: OpenAICompatClient, requests: list[tuple], limit: int) -> list:
+    """complete_json for each request, at most `limit` at a time, results in request order. A failed request
+    gives its LLMError; LLMUnavailable (server gone, no credit…) stops them all."""
+    sem = asyncio.Semaphore(max(1, limit))
+
+    async def one(request: tuple):
+        async with sem:
+            try:
+                return await client.complete_json(*request)
+            except LLMUnavailable:
+                raise
+            except LLMError as e:
+                return e
+
+    tasks = [asyncio.create_task(one(r)) for r in requests]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 def _crop_block(book_dir: Path, page: Page, block) -> Image.Image:
@@ -391,7 +469,9 @@ async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None
             logs.extend(extra)
     todo = [p for p in ctx.selected(doc) if p.index in restored or needs_review(p, settings.llm.review_policy)]
     pending = [p for p in todo if p.index not in restored]
-    client = OpenAICompatClient(settings.llm, cache_dir=book_dir / "llm" / "cache")
+    client = OpenAICompatClient(
+        settings.llm, cache_dir=book_dir / "llm" / "cache", usage_log=book_dir / "llm" / "usage.jsonl"
+    )
     sem = asyncio.Semaphore(max(1, settings.llm.concurrency))
     failed: dict[int, str] = {}  # page index -> why its LLM call failed (not saved: retried on resume)
     done = len(todo) - len(pending)
@@ -527,6 +607,8 @@ async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None
     failures = [f"p{i + 1}: {r}" for i, r in sorted(failed.items())]
     if failures:
         text += f"; {len(failures)} pages failed ({failures[0]})"
+    if usage := client.usage_summary():
+        _log.info("LLM usage: %s", usage)
     return {
         "pages": len(todo),
         "applied": applied,
@@ -534,6 +616,7 @@ async def _run_review(settings: Settings, book_dir: Path, pages: set[int] | None
         "failures": failures,
         "failed_pages": sorted(failed),
         "seconds": seconds,
+        "usage": client.usage,
         "text": text,
     }
 

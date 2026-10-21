@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from pdf2epub.config import LLMSettings
@@ -39,6 +41,7 @@ def _client_with_replies(replies: list, **settings):
     from pdf2epub.llm.client import OpenAICompatClient
 
     client = OpenAICompatClient(LLMSettings(_env_file=None, model="m", **settings))
+    client._server = client._profile()  # no network: the profile guessed from host and key
     calls = []
 
     async def create(**kwargs):
@@ -112,6 +115,7 @@ def _client_with(outcomes: list, **settings):
     from pdf2epub.llm.client import OpenAICompatClient
 
     client = OpenAICompatClient(LLMSettings(_env_file=None, model="m", **settings))
+    client._server = client._profile()  # no network: the profile guessed from host and key
     calls = []
 
     async def create(**kwargs):
@@ -206,3 +210,121 @@ def test_no_credit_pauses_and_odd_status_fails_the_page():
     with pytest.raises(LLMError, match="418") as e:
         _ask(client)
     assert not isinstance(e.value, LLMUnavailable)
+
+
+def test_usage_is_recorded_per_call(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    reply = _reply('{"a": 1}')
+    reply.usage = SimpleNamespace(
+        prompt_tokens=1200, completion_tokens=300, completion_tokens_details=None, prompt_tokens_details=None,
+        model_extra={"prompt_cache_hit_tokens": 1000},
+    )  # fmt: skip
+    reply.model_extra = {"timings": {"prompt_ms": 4000.0, "predicted_ms": 9000.0, "cache_n": 0}}
+    client, _ = _client_with_replies([reply, _reply('{"b": 2}')])
+    client.usage_log = tmp_path / "usage.jsonl"
+    asyncio.run(client.complete_json("sys", "one", [], {"type": "object"}, "page_review"))
+    asyncio.run(client.complete_json("sys", "two", [], {"type": "object"}, "page_review"))
+    t = client.usage["page_review"]
+    assert t["requests"] == 2 and t["prompt_tokens"] == 1200 and t["completion_tokens"] == 300
+    assert t["prompt_ms"] == 4000.0 and t["cached_prompt_tokens"] == 0  # server timings win over usage
+    lines = (tmp_path / "usage.jsonl").read_text().splitlines()
+    assert len(lines) == 2 and json.loads(lines[0])["call"] == "page_review"
+    assert "2 requests" in client.usage_summary()
+
+
+def test_reasoning_default_sends_nothing_new(monkeypatch):
+    monkeypatch.setattr("pdf2epub.config._toml_sources", lambda *a, **k: ())  # not the developer's config
+    client, calls = _client_with([_reply('{"a": 1}')], extra_body={"top_k": 5})
+    _ask(client)
+    assert calls[0]["extra_body"] == {"top_k": 5}
+
+
+def test_reasoning_is_mapped_per_provider(monkeypatch):
+    monkeypatch.setattr("pdf2epub.config._toml_sources", lambda *a, **k: ())  # not the developer's config
+    import asyncio
+
+    from pdf2epub.llm.client import OpenAICompatClient
+
+    def body(base_url, mode, **kw):
+        c = OpenAICompatClient(LLMSettings(_env_file=None, base_url=base_url, model="m", **kw))
+        return c._reasoning_body(mode)
+
+    assert body("https://api.deepseek.com", "off", api_key="k") == {"thinking": {"type": "disabled"}}
+    assert body("https://api.deepseek.com", "low", api_key="k")["reasoning_effort"] == "low"
+    assert body("http://localhost:8080/v1", "off") == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert body("https://api.openai.com/v1", "low", api_key="k") == {"reasoning_effort": "low"}
+    assert body("https://api.openai.com/v1", "default", api_key="k") == {}
+    # the user's own extra_body wins; a per-call mode overrides the setting
+    client, calls = _client_with(
+        [_reply('{"a": 1}')], base_url="https://api.deepseek.com", api_key="k", reasoning="off",
+        extra_body={"thinking": {"type": "enabled"}},
+    )  # fmt: skip
+    _ask(client)
+    assert calls[0]["extra_body"] == {"thinking": {"type": "enabled"}}
+    client, calls = _client_with([_reply('{"a": 1}')], base_url="https://api.deepseek.com", api_key="k")
+    asyncio.run(client.complete_json("sys", "q", [], {"type": "object"}, "t", reasoning="off"))
+    assert calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_rejected_reasoning_field_is_dropped(monkeypatch):
+    monkeypatch.setattr("pdf2epub.config._toml_sources", lambda *a, **k: ())  # not the developer's config
+    import openai
+
+    err = _status_error(openai.BadRequestError, 400, "Unrecognized request argument: reasoning_effort")
+    client, calls = _client_with([err, _reply('{"a": 1}')], base_url="https://x.ai/v1", api_key="k", reasoning="low")
+    assert _ask(client) == {"a": 1}
+    assert calls[0]["extra_body"] == {"reasoning_effort": "low"} and "extra_body" not in calls[1]
+
+
+def test_reasoning_mode_has_its_own_cache_entry(tmp_path):
+    from pdf2epub.llm.client import OpenAICompatClient
+
+    c = OpenAICompatClient(LLMSettings(_env_file=None, model="m"), cache_dir=tmp_path)
+    default = c._cache_key("s", "t", [], {})
+    assert default == c._cache_key("s", "t", [], {}, "default") != c._cache_key("s", "t", [], {}, "off")
+
+
+def test_server_profile_detection(monkeypatch):
+    import asyncio
+
+    from pdf2epub.llm import servers
+
+    def detect(props, base_url="http://10.0.0.5:8080/v1", key=False, setting="auto"):
+        async def fake_props(url):
+            return props
+
+        monkeypatch.setattr(servers, "_props", fake_props)
+        return asyncio.run(servers.detect(base_url, key, setting)).name
+
+    assert detect({"build_info": "Strata 0.1.43", "default_generation_settings": {}}) == "strata"
+    assert detect({"build_info": "b6500", "default_generation_settings": {"n_ctx": 4096}}) == "llamacpp"
+    assert detect(None) == "local"  # Ollama, LM Studio, … (no /props)
+    assert detect(None, "https://api.openai.com/v1", key=True) == "openai"
+    assert detect({"build_info": "Strata"}, "https://api.deepseek.com", key=True) == "deepseek"  # by host
+    assert detect({"build_info": "Strata"}, setting="openai") == "openai"  # llm.server wins
+
+
+def test_cache_hints_only_for_servers_that_have_them(monkeypatch):
+    from pdf2epub.llm import servers
+
+    monkeypatch.setattr("pdf2epub.config._toml_sources", lambda *a, **k: ())  # not the developer's config
+    client, calls = _client_with([_reply('{"a": 1}')], server="strata")
+    _ask(client)
+    assert calls[0]["extra_body"] == {"strata_prefix": {"messages": 1}}
+    client, calls = _client_with([_reply('{"a": 1}')], server="strata", prompt_cache="off")
+    _ask(client)
+    assert "extra_body" not in calls[0]
+    for name in ("openai", "deepseek", "local"):
+        assert servers.PROFILES[name].cache_fields == {}
+
+
+def test_rejected_cache_hint_is_dropped(monkeypatch):
+    import openai
+
+    monkeypatch.setattr("pdf2epub.config._toml_sources", lambda *a, **k: ())
+    err = _status_error(openai.BadRequestError, 400, "Unrecognized request argument supplied: cache_prompt")
+    client, calls = _client_with([err, _reply('{"a": 1}')], server="llamacpp")
+    assert _ask(client) == {"a": 1}
+    assert calls[0]["extra_body"] == {"cache_prompt": True} and "extra_body" not in calls[1]
