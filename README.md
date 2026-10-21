@@ -61,27 +61,36 @@ Built for the cases other converters get wrong:
 
 ## Sample conversions
 
-Scanned 1914 magazine pages, as a phone shows the first screen of each EPUB page. The middle column
-is the fast pipeline alone (`--no-llm`); the right column adds the AI page review with a small, heavily
-quantized local model on llama.cpp.
+Scanned magazine pages from 1914 and 1920, shown the way a phone displays the EPUB. The middle column
+is the fast pipeline alone (`--no-llm`); the right column adds the AI page review, here with a small,
+heavily quantized local model on llama.cpp. Red marks misread words, green marks what the review
+corrected after comparing the text with the page image.
 
 <p align="center">
-  <img src="docs/assets/samples/sciam-war-supply.png" alt="Scanned Scientific American page next to its EPUB rendering, without and with AI review: the AI-reviewed text replaces garbled OCR with readable sentences" width="100%">
+  <img src="docs/assets/samples/popsci-1920-bear.webp" alt="Popular Science page 'Killing a Bear with Electricity': without AI review the headline reads 'Kill in ga Bear with Electricity'; with AI review it reads 'Killing a Bear with Electricity'" width="100%">
 </p>
 
-**Garbled OCR, rewritten from the scan.** The scan's poor print gives lines like
-*"No boot news man wonld aderenke a new enter per se vided"*. The review reads the page image and
-restores *"No business man would undertake a new enterprise without first preparing a scheme"*.
+**Headline and opening fixed.** *"Kill in ga Bear"* becomes *"Killing a Bear"*, and the garbled
+*"TTovera slant hidden away"* becomes *"It was a small power plant hidden away"*.
 
 <p align="center">
-  <img src="docs/assets/samples/sciam-aircraft.png" alt="Scanned Scientific American page about aircraft next to its EPUB rendering, without and with AI review: OCR noise in the caption and first paragraph is fixed" width="100%">
+  <img src="docs/assets/samples/sciam-1914-supply.webp" alt="Scientific American page 'Feeding the Man on the Firing Line': without AI review the text contains misreadings such as 'No boot news man wonld aderenke'; with AI review it reads 'No business man would undertake'" width="100%">
 </p>
 
-**Caption and opening fixed.** *"le nv ing the great airship"* becomes *"leaving the great airship"*,
-and *"AM. eyos are tarned upward"* becomes *"All eyes are turned upward"*.
+**Poor print, readable text.** *"No boot news man wonld aderenke a new enter per se"* becomes
+*"No business man would undertake a new enterprise"*.
 
-<sub>Pages from *Scientific American*, 5 September 1914 (public domain), digitized by the
-[Internet Archive](https://archive.org/details/sim_scientific-american_1914-09-05_111_10).
+<p align="center">
+  <img src="docs/assets/samples/popsci-1920-gilbreth.webp" alt="Popular Science page about Frank Gilbreth: without AI review the name is split into 'Gil br eth' and the first line is garbled; with AI review the name and the opening sentence are correct" width="100%">
+</p>
+
+**Names and the first sentence fixed.** *"How Frank Gil br eth studies men"* becomes
+*"How Frank Gilbreth studies men"*, and *"Uilbreth I hed rith"* becomes *"UNTIL I talked with Frank B. Gilbreth"*.
+
+<sub>Pages from *Popular Science Monthly*, December 1920, and *Scientific American*, 5 September 1914
+(both public domain), digitized by the Internet Archive
+([1](https://archive.org/details/sim_popular-science_1920-12_97_6),
+[2](https://archive.org/details/sim_scientific-american_1914-09-05_111_10)).
 Rebuild these images with `scripts/readme_samples.py`.</sub>
 
 ## Quick start
