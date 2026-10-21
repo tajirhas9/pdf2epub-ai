@@ -24,6 +24,7 @@ import io
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -33,6 +34,7 @@ import openai
 from PIL import Image
 
 from pdf2epub.config import LLMSettings
+from pdf2epub.llm import servers
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ _TOO_LARGE = (
     "too many images", "image too large",
 )  # fmt: skip
 _NO_IMAGES = ("image_url", "image input", "does not support image", "not support vision", "vision is not", "multimodal")
+_REASONING_PARAMS = ("reasoning_effort", "thinking", "enable_thinking")
 _OUTPUT_LIMIT = ("max_tokens", "max_completion_tokens", "max_output_tokens", "output tokens")
 
 
@@ -89,7 +92,9 @@ class _TooLarge(Exception):
 
 
 class LLMClient(Protocol):
-    async def complete_json(self, system: str, text: str, images: list[ImagePart], schema: dict, name: str) -> dict: ...
+    async def complete_json(
+        self, system: str, text: str, images: list[ImagePart], schema: dict, name: str, reasoning: str | None = None
+    ) -> dict: ...
 
 
 def _server_message(e: Exception) -> str:
@@ -139,10 +144,40 @@ def extract_json(raw: str) -> dict:
     raise ValueError("no JSON object found in model reply")
 
 
+USAGE_FIELDS = (
+    "requests", "cached_replies", "retries", "prompt_tokens", "completion_tokens", "reasoning_tokens",
+    "cached_prompt_tokens", "prompt_ms", "predicted_ms", "seconds",
+)  # fmt: skip
+
+
+def _usage_record(resp, seconds: float) -> dict:
+    """Token counts and server timings of one reply. Fields a provider doesn't report are left out."""
+    rec: dict = {"seconds": round(seconds, 2)}
+    usage = getattr(resp, "usage", None)
+    if usage is not None:
+        rec["prompt_tokens"] = getattr(usage, "prompt_tokens", None)
+        rec["completion_tokens"] = getattr(usage, "completion_tokens", None)
+        details = getattr(usage, "completion_tokens_details", None)
+        rec["reasoning_tokens"] = getattr(details, "reasoning_tokens", None)
+        cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", None)
+        extra = getattr(usage, "model_extra", None) or {}
+        rec["cached_prompt_tokens"] = extra.get("prompt_cache_hit_tokens", cached)  # DeepSeek names it differently
+    timings = (getattr(resp, "model_extra", None) or {}).get("timings")  # llama.cpp: where the time went
+    if isinstance(timings, dict):
+        rec["prompt_ms"] = timings.get("prompt_ms")
+        rec["predicted_ms"] = timings.get("predicted_ms")
+        if timings.get("cache_n") is not None:
+            rec["cached_prompt_tokens"] = timings["cache_n"]
+    return {k: v for k, v in rec.items() if isinstance(v, (int, float))}
+
+
 class OpenAICompatClient:
-    def __init__(self, settings: LLMSettings, cache_dir: Path | None = None):
+    def __init__(self, settings: LLMSettings, cache_dir: Path | None = None, usage_log: Path | None = None):
         self.s = settings
         self.cache_dir = cache_dir
+        self.usage_log = usage_log  # one JSON line per request (pdf2epub.llm.client._usage_record)
+        self.usage: dict[str, dict[str, float]] = {}  # call name -> totals of USAGE_FIELDS
+        self._cache_miss_warned = False
         self._client = openai.AsyncOpenAI(
             base_url=settings.base_url,
             api_key=settings.key_value(),
@@ -155,6 +190,9 @@ class OpenAICompatClient:
         if self._auto and urlparse(settings.base_url).hostname in NO_JSON_SCHEMA_HOSTS:
             self._json_mode = "json_object"  # skip the json_schema request that is known to be rejected
         self._model = settings.model
+        self._send_reasoning = True  # dropped when the provider rejects the fields
+        self._send_cache_hints = settings.prompt_cache != "off"  # dropped when the provider rejects them
+        self._server: servers.ServerProfile | None = None  # detected on the first request (servers.detect)
         self._send_temperature = settings.temperature is not None
         self._max_tokens_field = "max_tokens"  # some providers require max_completion_tokens
         self._max_out = settings.max_output_tokens  # grows when replies get cut off (_grow_budget)
@@ -165,12 +203,16 @@ class OpenAICompatClient:
 
     # ---- public -------------------------------------------------------------------------
 
-    async def complete_json(self, system: str, text: str, images: list[ImagePart], schema: dict, name: str) -> dict:
+    async def complete_json(
+        self, system: str, text: str, images: list[ImagePart], schema: dict, name: str, reasoning: str | None = None
+    ) -> dict:
+        mode = reasoning or self.s.reasoning
         if len(images) > self.s.max_images_per_call:
             log.warning("%s: %d images > max %d, truncating", name, len(images), self.s.max_images_per_call)
             images = images[: self.s.max_images_per_call]
-        key = self._cache_key(system, text, images, schema)
+        key = self._cache_key(system, text, images, schema, mode)
         if (cached := self._cache_get(key)) is not None:
+            self._totals(name)["cached_replies"] += 1
             return cached
 
         for shrink in range(SHRINK_ROUNDS + 1):
@@ -179,7 +221,7 @@ class OpenAICompatClient:
                 {"role": "user", "content": self._user_content(text, images)},
             ]
             try:
-                raw = await self._create(messages, schema, name)
+                raw = await self._create(messages, schema, name, mode)
                 break
             except _TooLarge as e:
                 if shrink == SHRINK_ROUNDS or not images:
@@ -195,7 +237,7 @@ class OpenAICompatClient:
                 {"role": "user", "content": "That was not a valid JSON object. Reply with only the JSON object."},
             ]
             try:
-                raw = await self._create(messages, schema, name)
+                raw = await self._create(messages, schema, name, mode)
             except _TooLarge as e:
                 raise LLMError(f"{name}: model did not return JSON (repair request too large: {e})") from e
             try:
@@ -256,11 +298,14 @@ class OpenAICompatClient:
         self._model = ids[0]
         return self._model
 
-    async def _create(self, messages: list[dict], schema: dict, name: str) -> str:
+    async def _create(self, messages: list[dict], schema: dict, name: str, reasoning: str = "default") -> str:
         model = await self._resolve_model()
+        await self._detect_server()
         empty_retry = True
         waits = list(TRANSIENT_WAITS)
+        attempt = 0
         while True:
+            attempt += 1
             budget = self._max_out
             kwargs: dict = {"model": model, "messages": messages}
             if (fmt := self._response_format(schema, name)) is not None:
@@ -271,10 +316,12 @@ class OpenAICompatClient:
                 kwargs["temperature"] = self.s.temperature
             if budget:
                 kwargs[self._max_tokens_field] = budget
-            if self.s.extra_body:
-                kwargs["extra_body"] = self.s.extra_body
+            if body := {**self._cache_hints(), **self._reasoning_body(reasoning), **self.s.extra_body}:
+                kwargs["extra_body"] = body
             try:
+                t0 = time.perf_counter()
                 resp = await self._client.chat.completions.create(**kwargs)
+                self._record(name, _usage_record(resp, time.perf_counter() - t0), retry=attempt > 1)
             except TRANSIENT_ERRORS as e:
                 if waits:
                     wait = max(waits.pop(0), _retry_after(e) or 0)
@@ -287,7 +334,7 @@ class OpenAICompatClient:
                     raise LLMUnavailable(f"{name}: cannot reach {self.s.base_url}: {e}") from e
                 raise LLMUnavailable(f"{name}: {self.s.base_url} is not answering: {_server_message(e)}") from e
             except openai.BadRequestError as e:
-                if self._adjust(_server_message(e), budget, name):
+                if self._adjust(_server_message(e), budget, name, reasoning):
                     continue
                 raise LLMError(f"{name}: request rejected by provider: {_server_message(e)}") from e
             except openai.AuthenticationError as e:
@@ -304,7 +351,7 @@ class OpenAICompatClient:
                     raise LLMUnavailable(f"{name}: {self.s.base_url} refused the request (403): {msg}") from e
                 if e.status_code == 404:
                     raise LLMUnavailable(f"{name}: model {model!r} not found at {self.s.base_url}: {msg}") from e
-                if e.status_code == 422 and self._adjust(msg, budget, name):
+                if e.status_code == 422 and self._adjust(msg, budget, name, reasoning):
                     continue
                 raise LLMError(f"{name}: provider error {e.status_code}: {msg}") from e
             choice = resp.choices[0]
@@ -321,6 +368,50 @@ class OpenAICompatClient:
                 log.warning("%s: reply hit max_output_tokens (%d)", name, budget)
             return content
 
+    # ---- usage -------------------------------------------------------------------------
+
+    def _totals(self, name: str) -> dict[str, float]:
+        return self.usage.setdefault(name, dict.fromkeys(USAGE_FIELDS, 0))
+
+    def _record(self, name: str, rec: dict, retry: bool) -> None:
+        totals = self._totals(name)
+        totals["requests"] += 1
+        totals["retries"] += retry
+        for k, v in rec.items():
+            totals[k] += v
+        if self.usage_log is not None:
+            self.usage_log.parent.mkdir(parents=True, exist_ok=True)
+            with self.usage_log.open("a") as f:
+                f.write(json.dumps({"call": name, "retry": retry, **rec}) + "\n")
+        # A local server recomputing the same system prompt every request: by far the slowest part of a call.
+        if totals["requests"] == 3 and not self._cache_miss_warned and "prompt_ms" in rec:
+            if not totals["cached_prompt_tokens"]:
+                self._cache_miss_warned = True
+                log.warning(
+                    "%s reuses no prompt cache between requests: every call re-reads the whole prompt, "
+                    "including the system prompt that is the same for every page. Check the server's "
+                    "prompt-cache options (server-specific request fields go in llm.extra_body)",
+                    self.s.base_url,
+                )
+
+    def usage_summary(self) -> str:
+        """One line: requests, tokens and time per call name (empty when nothing was sent)."""
+        parts = []
+        for name, t in self.usage.items():
+            if not t["requests"]:
+                continue
+            bits = [f"{t['requests']:.0f} requests", f"{t['prompt_tokens']:.0f} in"]
+            bits.append(f"{t['completion_tokens']:.0f} out")
+            if t["reasoning_tokens"]:
+                bits.append(f"{t['reasoning_tokens']:.0f} reasoning")
+            if t["cached_prompt_tokens"]:
+                bits.append(f"{t['cached_prompt_tokens']:.0f} cached")
+            if t["retries"]:
+                bits.append(f"{t['retries']:.0f} retries")
+            bits.append(f"{t['seconds'] / t['requests']:.1f}s/request")
+            parts.append(f"{name}: " + ", ".join(bits))
+        return "; ".join(parts)
+
     def _grow_budget(self, budget: int, name: str) -> bool:
         """A reply hit the output cap: double it (up to the ceiling) for this and later calls."""
         if not budget or budget >= self._out_ceiling:
@@ -329,7 +420,7 @@ class OpenAICompatClient:
         log.warning("%s: reply cut off at %d tokens; retrying with %d", name, budget, self._max_out)
         return True
 
-    def _adjust(self, error: str, budget: int, name: str) -> bool:
+    def _adjust(self, error: str, budget: int, name: str, reasoning: str = "default") -> bool:
         """Change the request after a 400/422. True: retry. Raises when the request must change shape."""
         low = error.lower()
         if any(k in low for k in _TOO_LARGE):
@@ -343,11 +434,36 @@ class OpenAICompatClient:
             self._out_ceiling = self._max_out = max(self.s.max_output_tokens, (budget * 3) // 4)
             log.info("%s: output budget %d too high for the model; using %d", name, budget, self._max_out)
             return True
-        return self._degrade(error)
+        return self._degrade(error, reasoning)
 
-    def _degrade(self, error: str) -> bool:
+    async def _detect_server(self) -> servers.ServerProfile:
+        if self._server is None:
+            self._server = await servers.detect(self.s.base_url, bool(self.s.api_key), self.s.server)
+            log.info("%s: server profile %s", self.s.base_url, self._server.name)
+        return self._server
+
+    def _profile(self) -> servers.ServerProfile:
+        return self._server or servers.guess(self.s.base_url, bool(self.s.api_key), self.s.server)
+
+    def _cache_hints(self) -> dict:
+        """The server's prompt-cache fields (llm.prompt_cache; none for plain OpenAI-compatible servers)."""
+        return self._profile().cache_fields if self._send_cache_hints else {}
+
+    def _reasoning_body(self, mode: str) -> dict:
+        """The server's fields for llm.reasoning / llm.glyph_reasoning ("default": none)."""
+        return self._profile().reasoning_fields(mode) if self._send_reasoning else {}
+
+    def _degrade(self, error: str, reasoning: str = "default") -> bool:
         """Drop an unsupported feature after a 400. Returns True when a retry makes sense."""
         low = error.lower()
+        if self._send_reasoning and self._reasoning_body(reasoning) and any(k in low for k in _REASONING_PARAMS):
+            self._send_reasoning = False
+            log.info("provider rejected the reasoning setting; retrying without it")
+            return True
+        if self._send_cache_hints and any(k.lower() in low for k in self._cache_hints()):
+            self._send_cache_hints = False
+            log.info("provider rejected the prompt-cache fields; retrying without them")
+            return True
         if self._max_tokens_field == "max_tokens" and "max_tokens" in low and "max_completion_tokens" in low:
             self._max_tokens_field = "max_completion_tokens"
             return True
@@ -374,11 +490,15 @@ class OpenAICompatClient:
 
     # ---- cache --------------------------------------------------------------------------
 
-    def _cache_key(self, system: str, text: str, images: list[ImagePart], schema: dict) -> str:
+    def _cache_key(
+        self, system: str, text: str, images: list[ImagePart], schema: dict, reasoning: str = "default"
+    ) -> str:
         h = hashlib.sha256()
         for part in (self.s.base_url, self._model or "", system, text, json.dumps(schema, sort_keys=True)):
             h.update(part.encode())
             h.update(b"\0")
+        if reasoning != "default":  # keys of the default requests stay as they were
+            h.update(f"reasoning={reasoning}".encode())
         for img in images:
             h.update(hashlib.sha256(img.data).digest())
         return h.hexdigest()

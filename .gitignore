@@ -16,3 +16,4 @@ eval/results/
 .ruff_cache/
 # local reference documents (not redistributable); eval/corpus entries for them are skipped when absent
 sample/
+eval/ab/

@@ -139,3 +139,65 @@ def test_merge_retargets_note_markers():
     p.block("a").spans.append(Span(text="2", note_ref="n-cont", sup=True))
     assert OpApplier(p).apply({"op": "merge", "blocks": ["n", "n-cont"]}) is None
     assert p.block("a").spans[-1].note_ref == "n"
+
+
+def test_edit_fixes_one_unique_piece():
+    p = make()
+    [r] = OpApplier(p).apply_all([{"op": "edit", "block": "b1", "find": "M uham m ad", "replace": "Muhammad"}])
+    assert r.status == "applied"
+    assert p.block("b1").text == "Muhammad represents a com plete picture"
+
+
+def test_edit_rejects_ambiguous_missing_and_mark_edits():
+    from pdf2epub.ir import Span
+
+    p = make()
+    ap = OpApplier(p)
+    assert "3 times" in ap.apply({"op": "edit", "block": "b1", "find": "m", "replace": "M"})
+    assert "0 times" in ap.apply({"op": "edit", "block": "b1", "find": "nowhere", "replace": "x"})
+    assert ap.apply({"op": "edit", "block": "b1", "find": "", "replace": "x"})
+    b = p.block("b0")
+    b.spans = [Span(text="forced Ibrahim "), Span(text="عليه السلام", glyph="g000"), Span(text=" to send awy")]
+    assert "marks" in ap.apply({"op": "edit", "block": "b0", "find": "⟦g:g000⟧ to", "replace": "to"})
+    assert ap.apply({"op": "edit", "block": "b0", "find": "awy", "replace": "away"}) is None
+    assert [s.glyph for s in b.spans] == [None, "g000", None] and b.text.endswith("to send away")
+
+
+def test_edit_keeps_fix_text_guards():
+    p = make()  # b0 is trusted OCR: an edit that rewrites most of it is rejected like fix_text would be
+    find = "Linguistically, the word Arab means deserts"
+    op = {"op": "edit", "block": "b0", "find": find, "replace": "Nothing alike"}
+    assert OpApplier(p).apply(op) is not None
+    assert p.block("b0").text.startswith("Linguistically")
+
+
+def test_ops_that_change_nothing_are_skipped():
+    p = make()
+    for i, b in enumerate(p.blocks):
+        b.order = i
+    res = OpApplier(p).apply_all(
+        [
+            {"op": "set_role", "block": "b0", "role": "content"},
+            {"op": "set_type", "block": "b0", "type": "paragraph"},
+            {"op": "reorder", "blocks": [b.id for b in p.blocks]},
+            {"op": "edit", "block": "b0", "find": "Arab", "replace": "Arab"},
+            {"op": "set_role", "block": "b3", "role": "decoration"},
+        ]
+    )
+    assert [r.status for r in res] == ["skipped"] * 4 + ["applied"]
+
+
+def test_unchanged_fix_text_still_confirms_the_text():
+    p = make()
+    p.block("b1").flags = ["low-confidence"]
+    [r] = OpApplier(p).apply_all([{"op": "fix_text", "block": "b1", "text": p.block("b1").text}])
+    assert r.status == "applied" and "low-confidence" not in p.block("b1").flags
+
+
+def test_ops_schema_default_is_unchanged():
+    from pdf2epub.llm.ops import OPS_SCHEMA, ops_schema
+
+    assert ops_schema() is OPS_SCHEMA
+    edit = ops_schema(edit_op=True)
+    assert "edit" in edit["properties"]["ops"]["items"]["properties"]["op"]["enum"]
+    assert "edit" not in OPS_SCHEMA["properties"]["ops"]["items"]["properties"]["op"]["enum"]
