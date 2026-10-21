@@ -278,6 +278,11 @@ Shown automatically the first time (and any time from **Settings → Run first-t
 4. **Defaults** — the languages you usually convert (faster, more accurate OCR; leave empty to
    auto-detect) and the folder EPUBs are saved to.
 
+<p align="center">
+  <img src="docs/assets/ui/setup-check.webp" alt="First-run setup, step 1: checklist of Node.js, OCR engine, text recognition, vision models and Java, with a choice between Apple Vision and PaddleOCR" width="49%">
+  <img src="docs/assets/ui/setup-model.webp" alt="First-run setup, step 3: provider, server address, API key and model fields, with a successful Test connection result" width="49%">
+</p>
+
 ### 2. Convert a book
 
 1. **Choose a PDF** — drag it onto the page or click *browse your files*. The page count and title
@@ -289,12 +294,22 @@ Shown automatically the first time (and any time from **Settings → Run first-t
    - **File name** — defaults to the PDF's name; saved in the output folder shown below it.
    - **Advanced** — use the GPU, OCR engine (Apple Vision on a Mac / PaddleOCR), text-line detector (fast/accurate/automatic), render resolution for
      digital PDFs, keep intermediate files (for inspecting pages with `pdf2epub dev`).
+
+   <p align="center">
+     <img src="docs/assets/ui/convert.webp" alt="Convert screen: a chosen 8-page PDF, English as the book language, AI page review on for pages that need it, and the output file name" width="60%">
+   </p>
+
 3. **Convert to EPUB** — the book appears under **Conversions** with the current step, a progress
    bar and the elapsed time. *Show all steps* lists every step with its timing and findings.
    The first conversion downloads the OCR models (~250 MB, once); the card says so while it waits.
 4. When it's done: **Download EPUB**, or open it from the folder shown under *Saved to*.
    *Worth a look* lists places a careful reader may want to check (e.g. a two-page picture whose
    gutter was lost in the scan).
+
+<p align="center">
+  <img src="docs/assets/ui/progress.webp" alt="A conversion in progress: the AI review step at page 1 of 8 with a progress bar, Pause and Stop buttons, and every finished step with its timing and findings" width="49%">
+  <img src="docs/assets/ui/done.webp" alt="A finished conversion: Download EPUB button, file size, page and chapter count, the folder it was saved to, and a valid EPUB 3 check from epubcheck" width="49%">
+</p>
 
 Good to know:
 
@@ -379,6 +394,14 @@ pdf2epub dev                                      # workbench: original | phone 
 pdf2epub review                                   # AI review; pages update live in the workbench
 pdf2epub build -o ~/Books                         # EPUB + validation, then clean up
 ```
+
+<p align="center">
+  <img src="docs/assets/ui/workbench.webp" alt="Page workbench: the original scanned page with detected text and picture boxes next to phone, tablet and two-page renderings of the same page, and a table of the page's blocks with type, role, confidence and text" width="100%">
+</p>
+
+The workbench shows one page at a time: the original with the detected boxes, the page as a phone,
+a tablet and a two-page reader display it, and every text block with its role and OCR confidence
+(here before the AI review, so misreadings like *"Ya le Beach"* are still in the text).
 
 - `--pages 1-20,25` (convert/review) limits the work to some pages; `--from-stage <stage>` resumes
   from a checkpoint (stages: rasterize, layout, text, running, figures, spreads, order, glyphs).
