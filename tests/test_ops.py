@@ -201,3 +201,12 @@ def test_ops_schema_default_is_unchanged():
     edit = ops_schema(edit_op=True)
     assert "edit" in edit["properties"]["ops"]["items"]["properties"]["op"]["enum"]
     assert "edit" not in OPS_SCHEMA["properties"]["ops"]["items"]["properties"]["op"]["enum"]
+
+
+def test_set_role_keeps_joined_spread_half_hidden():
+    # the spread check joined this half into one picture on the facing page; the page review must not
+    # bring the half back as content (the picture would appear twice)
+    p = page(0, [block("f1", t=BlockType.FIGURE, role=Role.DECORATION, flags=["spread-part:p0001-b009"])])
+    [r] = OpApplier(p).apply_all([{"op": "set_role", "block": "f1", "role": "content"}])
+    assert r.status == "rejected"
+    assert p.block("f1").role == Role.DECORATION

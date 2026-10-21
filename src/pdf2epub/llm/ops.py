@@ -198,6 +198,8 @@ class OpApplier:
         b = self._block(op)
         if isinstance(b, str):
             return b
+        if any(f.startswith("spread-part:") for f in b.flags):
+            return "half of a joined two-page picture (shown once, on the left page)"
         try:
             b.role = Role(op.get("role"))
         except ValueError:
