@@ -1,0 +1,66 @@
+name: Bug report
+description: Something converts wrong, crashes, or doesn't work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Security problems go to [SECURITY.md](https://github.com/tajirhas9/pdf2epub-ai/blob/main/SECURITY.md), not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, what you got instead. Screenshots of the page help a lot.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or web-app steps
+      placeholder: pdf2epub run book.pdf --langs en,ar
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `pdf2epub --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Linux, macOS (Apple silicon), macOS (Intel), Windows, Windows (WSL2), Docker]
+    validations:
+      required: true
+  - type: dropdown
+    id: ocr
+    attributes:
+      label: OCR engine
+      options: [Apple Vision, PaddleOCR (GPU), PaddleOCR (CPU), Not sure]
+  - type: input
+    id: llm
+    attributes:
+      label: AI model
+      description: Provider and model, or "none" with --no-llm
+      placeholder: "llama.cpp · qwen3-vl-8b"
+  - type: textarea
+    id: log
+    attributes:
+      label: Log output
+      description: Run with `pdf2epub -v …` and paste the relevant part. Remove API keys.
+      render: text
+  - type: textarea
+    id: document
+    attributes:
+      label: Document
+      description: Link to the PDF (or one page of it) if you are allowed to share it, or describe it (scanned/digital, languages, layout).
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
