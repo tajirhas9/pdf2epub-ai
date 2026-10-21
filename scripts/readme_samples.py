@@ -244,10 +244,12 @@ def compose(pdf: Path, book: str, number: int, top: int | None, out: Path) -> No
     print(f"{out} {out.stat().st_size // 1024} KB (top {top})")
 
 
-def spread(book: str, left: int, out: Path) -> None:
+def spread(book: str, left: int, out: Path, ai: bool = False) -> None:
     """The two halves a page-by-page conversion gets, next to the one picture pdf2epub-ai makes."""
     book_dir = ROOT / "work" / book
-    doc = Document.model_validate_json((book_dir / "ir" / "spreads.json").read_text())
+    # an uncertain spread is only joined once the AI review confirms it
+    stage = "review" if ai else "spreads"
+    doc = Document.model_validate_json((book_dir / "ir" / f"{stage}.json").read_text())
     sp = next(s for s in doc.spreads if s.left_page == left - 1 and s.image)
     Image.MAX_IMAGE_PIXELS = None  # stitched spreads are scanned at full resolution
 
@@ -285,10 +287,11 @@ def spread(book: str, left: int, out: Path) -> None:
     bx = x0 + halves[0].width + inner // 2
     for yy in range(y + 10, y + height - 10, 18):
         draw.line((bx, yy, bx, yy + 9), fill=MUTED, width=3)
-    label("Converted page by page", "two half pictures on two pages", x0, left_w, MUTED)
+    label("Without AI review" if ai else "Converted page by page", "two half pictures on two pages", x0, left_w, MUTED)
     jx = x0 + left_w + gap
     card(joined, jx)
-    label("pdf2epub-ai", "one picture, aligned at the gutter", jx, joined.width, ACCENT)
+    note = "the AI confirmed the halves belong together" if ai else "one picture, aligned at the gutter"
+    label("With AI review" if ai else "pdf2epub-ai", note, jx, joined.width, ACCENT)
     out.parent.mkdir(parents=True, exist_ok=True)
     canvas.convert("RGB").save(out, lossless=True, method=6)
     print(f"{out} {out.stat().st_size // 1024} KB ({sp.status.value})")
@@ -309,11 +312,12 @@ def main() -> None:
     sp.add_argument("book")
     sp.add_argument("left", type=int, help="1-based number of the left page of the spread")
     sp.add_argument("--out", type=Path, required=True)
+    sp.add_argument("--ai", action="store_true", help="a spread the AI review joined: without vs with AI labels")
     a = ap.parse_args()
     if a.cmd == "pages":
         pages(a.book)
     elif a.cmd == "spread":
-        spread(a.book, a.left, a.out)
+        spread(a.book, a.left, a.out, a.ai)
     else:
         compose(a.pdf, a.book, a.page, a.top, a.out)
 

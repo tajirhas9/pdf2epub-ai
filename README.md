@@ -69,6 +69,13 @@ is proven they are stitched seamlessly. No AI needed for this one.
   <img src="docs/assets/samples/harpers-1864-spread.webp" alt="Harper's Weekly 1864 double-page Civil War engraving: a page-by-page conversion gives two half pictures on two pages; pdf2epub-ai joins them into one picture" width="100%">
 </p>
 
+When the seam can't be proven (here, a dark 1900 engraving), the halves stay apart unless the AI
+review looks at both pages and confirms they are one picture:
+
+<p align="center">
+  <img src="docs/assets/samples/harpers-1900-spread-ai.webp" alt="Harper's Weekly 1900 double-page cartoon: without AI review the two halves stay on separate pages; with AI review they are joined into one picture" width="100%">
+</p>
+
 **Fixing what OCR misread.** Scanned magazine pages from 1914 and 1920, shown the way a phone
 displays the EPUB. The middle column is the fast pipeline alone (`--no-llm`); the right column adds
 the AI page review, here with a small, heavily quantized local model on llama.cpp. Red marks misread
@@ -95,11 +102,12 @@ words, green marks what the review corrected after comparing the text with the p
 **Names and the first sentence fixed.** *"How Frank Gil br eth studies men"* becomes
 *"How Frank Gilbreth studies men"*, and *"Uilbreth I hed rith"* becomes *"UNTIL I talked with Frank B. Gilbreth"*.
 
-<sub>Pages from *Harper's Weekly*, 18 June 1864, *Popular Science Monthly*, December 1920, and
-*Scientific American*, 5 September 1914 (all public domain), digitized by the Internet Archive
-([1](https://archive.org/details/sim_harpers-weekly_harpers-weekly_1864-06-18_8_390),
-[2](https://archive.org/details/sim_popular-science_1920-12_97_6),
-[3](https://archive.org/details/sim_scientific-american_1914-09-05_111_10)).
+<sub>Pages from *Harper's Weekly*, 18 June 1864 and 7 July 1900, *Popular Science Monthly*,
+December 1920, and *Scientific American*, 5 September 1914 (all public domain), digitized by the
+Internet Archive ([1](https://archive.org/details/sim_harpers-weekly_harpers-weekly_1864-06-18_8_390),
+[2](https://archive.org/details/sim_harpers-weekly_harpers-weekly_1900-07-07_44_2272),
+[3](https://archive.org/details/sim_popular-science_1920-12_97_6),
+[4](https://archive.org/details/sim_scientific-american_1914-09-05_111_10)).
 Rebuild these images with `scripts/readme_samples.py`.</sub>
 
 ## Quick start
