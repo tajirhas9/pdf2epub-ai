@@ -140,6 +140,7 @@ pdf2epub run book.pdf --no-llm     # fastest: no AI review (fine for clean digit
 - [Tutorial: web app](#tutorial-web-app) — first-run setup, converting a book
 - [Tutorial: command line](#tutorial-command-line) — `run`, step by step with the workbench, [all commands](#all-commands)
 - [Connecting an AI model](#connecting-an-ai-model) — providers, keys, tips for local models
+- [Performance](#performance) — measured speed, local vs cloud, estimates
 - [Configuration](#configuration) — config file, environment variables, where files live
 - [Pause & resume](#pause--resume)
 - [Troubleshooting](#troubleshooting)
@@ -443,6 +444,57 @@ Tips:
 
 ---
 
+## Performance
+
+Measured on the sample books above (scanned magazine pages, 200 dpi) on an Apple M3 Pro with Apple
+Vision OCR. Your numbers will differ with hardware, page size and model.
+
+**Without AI review** (`--no-llm`):
+
+| pages | time per page |
+|---|---|
+| scanned text pages with pictures | ~2.5–4 s |
+| scanned pages with two-page spreads (registration and seam check) | ~13–25 s |
+
+With an NVIDIA GPU the OCR step drops well under 1 s per page; on CPU-only Paddle expect ~5–8 s per
+scanned page.
+
+**With AI review, measured.** One page review sends the page image, zoomed crops and the page text
+(~2.5–7k prompt tokens) and gets back edit operations (~150–1,400 output tokens).
+
+| model | where | prompt read | output | time per page |
+|---|---|---|---|---|
+| Qwen 3.8 flash, IQ2_XS (small, heavily quantized) | llama.cpp-type server, RTX 5070 Ti, 1 slot | 80–125 tok/s | 25–30 tok/s | **70–110 s** |
+| DeepSeek `deepseek-flash`, thinking off | cloud API | — | — | **~3 s** |
+
+On the local server about 60% of the time is spent reading the prompt: requests with images are not
+served from the prompt cache, so every page pays the full prefill. A 300-page scan takes 6–9 hours
+there; [pause & resume](#pause--resume) is built for that.
+
+**With AI review, estimated for cloud APIs.** Frontier cloud models are not benchmarked here; this is
+the arithmetic for a typical page of ~5k prompt and ~800 output tokens, thinking off:
+
+```
+seconds per page ≈ prompt tokens / prompt speed + output tokens / output speed + ~1 s latency
+```
+
+| output speed | prompt speed | per page | 300 pages, `llm.concurrency 1` | `llm.concurrency 4` |
+|---|---|---|---|---|
+| 50 tok/s | ~1,000 tok/s | ~22 s | ~1 h 50 min | ~30 min |
+| 100 tok/s | ~2,000 tok/s | ~11 s | ~1 h | ~15 min |
+| 200 tok/s | ~3,000 tok/s | ~6 s | ~35 min | ~8 min |
+
+- **Thinking multiplies the output.** On a 656-page scan with DeepSeek thinking on, ~90% of output
+  tokens were hidden reasoning (cost $2.37). Turn it off (see [tips](#connecting-an-ai-model)).
+- **Concurrency helps cloud APIs**, up to the provider's rate limit. Keep `llm.concurrency 1` for
+  one-slot local servers.
+- **Fewer pages, less time.** The default `llm.review_policy flagged` skips pages the fast pipeline
+  is sure about; on scans most pages are flagged, on clean digital PDFs few are.
+- Every request's time and token counts are written to `work/<book>/llm/usage.jsonl`. Review a few
+  pages of your book to get your own per-page number.
+
+---
+
 ## Configuration
 
 Settings come from (highest first): **command-line flags** → **environment variables**
@@ -541,7 +593,7 @@ PDF again in the web app continues its progress.
 | GPU not used | update the NVIDIA driver (check `nvidia-smi`), then `pdf2epub install-paddle --reinstall`. In Docker add `--gpus all` |
 | `cannot reach the LLM at …` | is the server running? right address and port? `pdf2epub llm-check`; or convert with `--no-llm` |
 | HTTP 401/403 from the model | wrong or missing API key; for local servers in Docker see [Docker](#docker) |
-| AI review very slow | turn off "thinking" (see [tips](#connecting-an-ai-model)), `llm.concurrency 1` for one-slot local servers, or review only flagged pages |
+| AI review very slow | turn off "thinking" (see [tips](#connecting-an-ai-model)), `llm.concurrency 1` for one-slot local servers, or review only flagged pages; see [Performance](#performance) |
 | "not validated" after a build | install Java to enable epubcheck; the EPUB is still built |
 | `npm ci failed` on first use | the first build installs the EPUB build tools (needs internet once) |
 | first conversion is slow | the OCR models download once (~250 MB) |
