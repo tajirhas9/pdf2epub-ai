@@ -8,7 +8,8 @@
 (`review` stage), as standalone XHTML under work/<book>/readme/{before,after}/. `compose` renders one
 page of both as a phone reader shows it, marks the words that differ (red: only without the review,
 green: only with it), picks the phone screen with the most changes, and lays out original | before |
-after on a 16:10 canvas.
+after on a 16:10 canvas. `spread` shows a picture printed across two facing pages next to the single
+picture the EPUB gets, next to the two half pictures a page-by-page conversion would keep.
 """
 
 from __future__ import annotations
@@ -243,6 +244,56 @@ def compose(pdf: Path, book: str, number: int, top: int | None, out: Path) -> No
     print(f"{out} {out.stat().st_size // 1024} KB (top {top})")
 
 
+def spread(book: str, left: int, out: Path) -> None:
+    """The two halves a page-by-page conversion gets, next to the one picture pdf2epub-ai makes."""
+    book_dir = ROOT / "work" / book
+    doc = Document.model_validate_json((book_dir / "ir" / "spreads.json").read_text())
+    sp = next(s for s in doc.spreads if s.left_page == left - 1 and s.image)
+    Image.MAX_IMAGE_PIXELS = None  # stitched spreads are scanned at full resolution
+
+    def load(rel: str, height: int) -> Image.Image:
+        im = Image.open(book_dir / rel).convert("RGB")
+        return im.resize((round(im.width * height / im.height), height), Image.LANCZOS)
+
+    figs = {b.id: b for page in doc.pages for b in page.blocks}
+    height, gap, inner = 470, 56, 64
+    halves = [load(figs[bid].image.path, height) for bid in (sp.left_block, sp.right_block)]
+    joined = load(sp.image.path, height)
+    left_w = halves[0].width + inner + halves[1].width
+    x0 = (W - (left_w + gap + joined.width)) // 2
+    y = (H - height) // 2 + 10
+
+    canvas = Image.new("RGBA", (W, H), BG)
+    draw = ImageDraw.Draw(canvas)
+    label_font, note_font = _font(26, bold=True), _font(20)
+
+    def card(im: Image.Image, x: int) -> None:
+        shadow = Image.new("RGBA", (im.width + 60, im.height + 60), (0, 0, 0, 0))
+        ImageDraw.Draw(shadow).rounded_rectangle((30, 34, im.width + 30, im.height + 34), 14, fill=(20, 24, 40, 60))
+        canvas.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(14)), (x - 30, y - 30))
+        canvas.alpha_composite(_rounded(im, 12), (x, y))
+
+    def label(text: str, note: str, x: int, w: int, color: str) -> None:
+        tw = draw.textlength(text, font=label_font)
+        draw.text((x + (w - tw) / 2, y - 56), text, font=label_font, fill=color)
+        nw = draw.textlength(note, font=note_font)
+        draw.text((x + (w - nw) / 2, y + height + 26), note, font=note_font, fill=MUTED)
+
+    card(halves[0], x0)
+    card(halves[1], x0 + halves[0].width + inner)
+    # page break between the halves
+    bx = x0 + halves[0].width + inner // 2
+    for yy in range(y + 10, y + height - 10, 18):
+        draw.line((bx, yy, bx, yy + 9), fill=MUTED, width=3)
+    label("Converted page by page", "two half pictures on two pages", x0, left_w, MUTED)
+    jx = x0 + left_w + gap
+    card(joined, jx)
+    label("pdf2epub-ai", "one picture, aligned at the gutter", jx, joined.width, ACCENT)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    canvas.convert("RGB").save(out, lossless=True, method=6)
+    print(f"{out} {out.stat().st_size // 1024} KB ({sp.status.value})")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -254,9 +305,15 @@ def main() -> None:
     c.add_argument("page", type=int, help="1-based page number")
     c.add_argument("--top", type=int, help="scroll offset (CSS px) of the screen; default: most changes")
     c.add_argument("--out", type=Path, required=True)
+    sp = sub.add_parser("spread")
+    sp.add_argument("book")
+    sp.add_argument("left", type=int, help="1-based number of the left page of the spread")
+    sp.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
     if a.cmd == "pages":
         pages(a.book)
+    elif a.cmd == "spread":
+        spread(a.book, a.left, a.out)
     else:
         compose(a.pdf, a.book, a.page, a.top, a.out)
 

@@ -61,10 +61,18 @@ Built for the cases other converters get wrong:
 
 ## Sample conversions
 
-Scanned magazine pages from 1914 and 1920, shown the way a phone displays the EPUB. The middle column
-is the fast pipeline alone (`--no-llm`); the right column adds the AI page review, here with a small,
-heavily quantized local model on llama.cpp. Red marks misread words, green marks what the review
-corrected after comparing the text with the page image.
+**A picture printed across two facing pages** becomes one picture in the EPUB. Both halves are
+registered (shift, scale, rotation) and placed side by side at the gutter; if the seam continuity
+is proven they are stitched seamlessly. No AI needed for this one.
+
+<p align="center">
+  <img src="docs/assets/samples/harpers-1864-spread.webp" alt="Harper's Weekly 1864 double-page Civil War engraving: a page-by-page conversion gives two half pictures on two pages; pdf2epub-ai joins them into one picture" width="100%">
+</p>
+
+**Fixing what OCR misread.** Scanned magazine pages from 1914 and 1920, shown the way a phone
+displays the EPUB. The middle column is the fast pipeline alone (`--no-llm`); the right column adds
+the AI page review, here with a small, heavily quantized local model on llama.cpp. Red marks misread
+words, green marks what the review corrected after comparing the text with the page image.
 
 <p align="center">
   <img src="docs/assets/samples/popsci-1920-bear.webp" alt="Popular Science page 'Killing a Bear with Electricity': without AI review the headline reads 'Kill in ga Bear with Electricity'; with AI review it reads 'Killing a Bear with Electricity'" width="100%">
@@ -87,10 +95,11 @@ corrected after comparing the text with the page image.
 **Names and the first sentence fixed.** *"How Frank Gil br eth studies men"* becomes
 *"How Frank Gilbreth studies men"*, and *"Uilbreth I hed rith"* becomes *"UNTIL I talked with Frank B. Gilbreth"*.
 
-<sub>Pages from *Popular Science Monthly*, December 1920, and *Scientific American*, 5 September 1914
-(both public domain), digitized by the Internet Archive
-([1](https://archive.org/details/sim_popular-science_1920-12_97_6),
-[2](https://archive.org/details/sim_scientific-american_1914-09-05_111_10)).
+<sub>Pages from *Harper's Weekly*, 18 June 1864, *Popular Science Monthly*, December 1920, and
+*Scientific American*, 5 September 1914 (all public domain), digitized by the Internet Archive
+([1](https://archive.org/details/sim_harpers-weekly_harpers-weekly_1864-06-18_8_390),
+[2](https://archive.org/details/sim_popular-science_1920-12_97_6),
+[3](https://archive.org/details/sim_scientific-american_1914-09-05_111_10)).
 Rebuild these images with `scripts/readme_samples.py`.</sub>
 
 ## Quick start
