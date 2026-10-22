@@ -17,3 +17,6 @@ eval/results/
 # local reference documents (not redistributable); eval/corpus entries for them are skipped when absent
 sample/
 eval/ab/
+.DS_Store
+.claude/
+.playwright-mcp/
