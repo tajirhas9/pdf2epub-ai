@@ -1,12 +1,7 @@
+# No `uv` entry: Dependabot cannot reach Paddle's CUDA index (403), so uv.lock updates always fail.
+# Security alerts still cover uv.lock; upgrade with `uv lock --upgrade-package <name>`.
 version: 2
 updates:
-  - package-ecosystem: uv
-    directory: /
-    schedule:
-      interval: weekly
-    groups:
-      python:
-        patterns: ["*"]
   - package-ecosystem: npm
     directory: /web
     schedule:
