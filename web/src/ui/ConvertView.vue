@@ -207,7 +207,7 @@ onMounted(() => { if (!store.system) loadSystem() }) // OCR engines on this comp
               </div>
               <div class="field">
                 <label for="c-dpi">Render resolution (DPI)</label>
-                <input id="c-dpi" v-model.number="options.vector_dpi" type="number" min="72" max="600" step="10" />
+                <input id="c-dpi" v-model.number="options.vector_dpi" type="number" min="72" max="600" />
               </div>
             </div>
           </div>

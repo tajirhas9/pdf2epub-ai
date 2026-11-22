@@ -21,6 +21,11 @@ const appleAvailable = computed(() => !!engines.value?.available.includes('apple
 const recommendedLabel = computed(() => (engines.value?.recommended === 'apple' ? 'Apple Vision' : 'PaddleOCR'))
 const usesPaddle = (choice: string) => (choice === 'auto' ? engines.value?.recommended !== 'apple' : choice === 'paddle')
 
+// A field failing browser validation inside a collapsed <details> blocks submit with no visible error.
+function revealInvalid(e: Event) {
+  ;(e.target as HTMLElement).closest('details')?.setAttribute('open', '')
+}
+
 async function save() {
   try {
     await d.save()
@@ -32,7 +37,7 @@ async function save() {
 </script>
 
 <template>
-  <form class="stack" @submit.prevent="save">
+  <form class="stack" @submit.prevent="save" @invalid.capture="revealInvalid">
     <div class="intro">
       <h1>Settings</h1>
       <p class="muted small">Defaults for every conversion. The command line (<code>pdf2epub config</code>) reads and writes the same file.</p>
@@ -83,12 +88,12 @@ async function save() {
                 </div>
                 <div class="field">
                   <label for="s-max">Max reply length (tokens)</label>
-                  <input id="s-max" v-model.number="v['llm.max_output_tokens']" type="number" min="256" step="256" />
+                  <input id="s-max" v-model.number="v['llm.max_output_tokens']" type="number" min="256" />
                   <span class="hint">Stops runaway answers from small models.</span>
                 </div>
                 <div class="field">
                   <label for="s-timeout">Timeout per request (s)</label>
-                  <input id="s-timeout" v-model.number="v['llm.timeout_s']" type="number" min="10" step="10" />
+                  <input id="s-timeout" v-model.number="v['llm.timeout_s']" type="number" min="10" />
                 </div>
               </div>
               <div class="field">
@@ -148,7 +153,7 @@ async function save() {
               </div>
               <div class="field">
                 <label for="s-dpi">Page render resolution (DPI)</label>
-                <input id="s-dpi" v-model.number="v.vector_dpi" type="number" min="72" max="600" step="10" />
+                <input id="s-dpi" v-model.number="v.vector_dpi" type="number" min="72" max="600" />
                 <span class="hint">For digital PDFs. Higher is sharper but slower.</span>
               </div>
             </div>
