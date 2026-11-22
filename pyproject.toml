@@ -93,6 +93,7 @@ select = ["E", "F", "W", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "fixture-scope"  # pytest-asyncio 1.5 default; set to silence its warning
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B023"]  # helper closures are called inside the loop iteration that defines them
