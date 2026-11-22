@@ -58,7 +58,7 @@ build time; `PDF2EPUB_REQUIRE_UI_BUILD=1` makes a missing Node an error instead 
    ```bash
    uv run pytest                 # unit + end-to-end (synthetic PDF → EPUB → epubcheck) + web backend
    uvx ruff check src tests      # lint (config in pyproject.toml)
-   cd web && npm run typecheck   # web app and page templates
+   cd web && npm run typecheck && npm test   # web app, page templates, EPUB assembly
    uv run pdf2epub eval          # corpus evaluation: must show no regressions (eval/README.md)
    ```
 

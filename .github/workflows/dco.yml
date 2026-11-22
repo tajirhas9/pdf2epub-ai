@@ -1,0 +1,34 @@
+name: DCO
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check every commit has a Signed-off-by line
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            author=$(git log -1 --format='%ae' "$sha")
+            if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly)' "$sha" | grep -qiF "<$author>"; then
+              echo "::error::$(git log -1 --format='%h %s' "$sha") is missing 'Signed-off-by: ... <$author>'"
+              missing=1
+            fi
+          done
+          if [ "$missing" = 1 ]; then
+            echo "Sign off with: git commit --amend -s (last commit) or git rebase --signoff ${{ github.event.pull_request.base.ref }}"
+            exit 1
+          fi
+          echo "All commits signed off."

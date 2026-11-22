@@ -10,7 +10,7 @@
 
 - [ ] `uv run pytest` passes
 - [ ] `uvx ruff check src tests` is clean
-- [ ] `cd web && npm run typecheck` passes (if `web/` changed)
+- [ ] `cd web && npm run typecheck && npm test` passes (if `web/` changed)
 - [ ] `uv run pdf2epub eval` shows no regressions (if conversion heuristics or prompts changed)
 - [ ] README updated (if commands, options or visible behaviour changed)
 - [ ] Commits are signed off (`git commit -s`) and I agree to the [contribution license grant](https://github.com/tajirhas9/pdf2epub-ai/blob/main/CONTRIBUTING.md#licensing-of-contributions)
