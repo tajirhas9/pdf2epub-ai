@@ -4,7 +4,7 @@
 #       -e LLM_BASE_URL -e LLM_API_KEY -e LLM_MODEL pdf2epub run book.pdf -o /data
 # Web app: add -p 8765:8765 -v pdf2epub-config:/config and run `pdf2epub ui --host 0.0.0.0 --no-open`
 # CPU only: docker build --build-arg PADDLE=cpu -t pdf2epub:cpu .   (run without --gpus)
-FROM python:3.11-slim-bookworm
+FROM python:3.15-slim-bookworm
 
 ARG PADDLE=gpu
 ARG NODE_MAJOR=22
