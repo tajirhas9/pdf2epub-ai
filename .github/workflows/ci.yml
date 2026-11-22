@@ -46,6 +46,12 @@ jobs:
           curl -fsSL -o /tmp/ec.zip \
             "https://github.com/w3c/epubcheck/releases/download/v${EPUBCHECK_VERSION}/epubcheck-${EPUBCHECK_VERSION}.zip"
           unzip -q /tmp/ec.zip -d .cache/epubcheck
+      - name: Test fonts (glyph tests)
+        run: |
+          sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+          mkdir -p .cache/fonts
+          curl -fsSL -o .cache/fonts/Amiri-Regular.ttf \
+            https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf
       - name: Ruff
         run: |
           uv run ruff check src tests
