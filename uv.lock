@@ -1261,6 +1261,7 @@ name = "pdf2epub"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "keyring" },
     { name = "numpy" },
     { name = "openai" },
@@ -1298,6 +1299,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "keyring", specifier = ">=25.7.0" },
     { name = "numpy", specifier = ">=1.26,<2.4" },
     { name = "openai", specifier = ">=3.31.0" },
