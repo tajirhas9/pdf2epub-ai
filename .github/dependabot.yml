@@ -21,3 +21,7 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # The project requires Python 3.11 (requires-python, Paddle builds); only take 3.11 image updates.
+      - dependency-name: python
+        versions: [">=3.12"]
