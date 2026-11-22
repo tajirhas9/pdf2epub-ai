@@ -131,3 +131,94 @@ def test_row_merge_keeps_columns_apart():
     mk = lambda t, x0, x1: Line(text=t, score=0.95, bbox=BBox(x0=x0, y0=0.5, x1=x1, y1=0.52), script="latin")  # noqa: E731
     merged = merge_row_fragments([mk("left column text", 0.05, 0.45), mk("right column text", 0.55, 0.95)])
     assert len(merged) == 2
+
+
+def _ln(text, x0, y0, x1, y1, vertical=False):
+    return Line(text=text, score=0.95, bbox=BBox(x0=x0, y0=y0, x1=x1, y1=y1), script="latin", vertical=vertical)
+
+
+def test_vertical_side_label_is_not_merged_into_rows():
+    """A rotated margin label overlaps every row beside it; it must not glue onto any of them."""
+    from pdf2epub.stages.text import merge_row_fragments
+
+    label = _ln("The Seald Nectar", 0.94, 0.43, 0.97, 0.58, vertical=True)
+    rows = [
+        _ln("Having fully perceived that Muhammad could never be prevented", 0.09, 0.432, 0.84, 0.448),
+        _ln("from his Call, the Quraish, in a desperate attempt", 0.08, 0.454, 0.84, 0.470),
+        _ln("wave of the Call, turned to other dishonorable means", 0.08, 0.476, 0.84, 0.492),
+    ]
+    merged = merge_row_fragments([label, *rows])
+    assert sorted(ln.text for ln in merged) == sorted(ln.text for ln in [label, *rows])
+
+
+def test_heading_row_keeps_side_label_out():
+    from pdf2epub.stages.text import merge_row_fragments
+
+    label = _ln("The Seald Nectar", 0.044, 0.12, 0.075, 0.266, vertical=True)
+    heading = _ln("The Farewell", 0.178, 0.116, 0.445, 0.153)
+    assert sorted(ln.text for ln in merge_row_fragments([heading, label])) == ["The Farewell", "The Seald Nectar"]
+
+
+def test_drop_cap_joins_only_its_first_line():
+    """A tall box (drop cap) spanning three rows must not chain them into one line."""
+    from pdf2epub.stages.text import merge_row_fragments
+
+    cap = _ln("A", 0.17, 0.30, 0.22, 0.36)
+    rows = [
+        _ln("fter the accomplishment of the call", 0.23, 0.30, 0.85, 0.316),
+        _ln("proclamation of the Message, and the", 0.23, 0.321, 0.85, 0.337),
+        _ln("establishment of a new society", 0.23, 0.342, 0.85, 0.358),
+    ]
+    merged = sorted(merge_row_fragments([cap, *rows]), key=lambda ln: ln.bbox.cy)
+    assert [ln.text for ln in merged] == [
+        "After the accomplishment of the call",
+        "proclamation of the Message, and the",
+        "establishment of a new society",
+    ]
+
+
+def test_ocr_vertical_box_detection():
+    from pdf2epub.stages.text import _is_vertical_box
+
+    assert _is_vertical_box(w=20, h=150, line_h=22)  # rotated side label
+    assert not _is_vertical_box(w=40, h=70, line_h=22)  # drop cap
+    assert not _is_vertical_box(w=5, h=22, line_h=22)  # a lone "1" or "l"
+
+
+def test_text_layer_marks_rotated_words():
+    sample_pdf_page = 607
+    import pytest
+
+    from pdf2epub.paths import REPO_ROOT
+
+    pdf = REPO_ROOT / "sample" / "bug" / "The Sealed Nectar.pdf"
+    if not pdf.exists():
+        pytest.skip("sample PDF not present")
+    import pymupdf
+
+    from pdf2epub.stages.rasterize import _words
+    from pdf2epub.stages.text import lines_from_words, merge_row_fragments
+
+    with pymupdf.open(pdf) as doc:
+        words = _words(doc[sample_pdf_page - 1])
+    assert {w.text for w in words if w.vertical} == {"The", "Seald", "Nectar"}
+    texts = [ln.text for ln in merge_row_fragments(lines_from_words(words))]
+    assert "The Farewel" in texts and "The Seald Nectar" in texts
+
+
+def test_raised_drop_cap_starts_first_line():
+    """Initial rising above line 1 and hanging over line 2 (p607 'After')."""
+    from pdf2epub.stages.text import merge_row_fragments
+
+    cap = _ln("After", 0.165, 0.282, 0.437, 0.437)
+    rows = [
+        _ln("the accomplishment of the call, the", 0.396, 0.335, 0.857, 0.358),
+        _ln("proclamation of the Message, and the", 0.402, 0.358, 0.858, 0.379),
+        _ln("establishment of a new society on the basis of There", 0.296, 0.382, 0.854, 0.4),
+        _ln("is no God but Allah, and on Muhammad's mission,", 0.296, 0.404, 0.854, 0.42),
+    ]
+    merged = sorted(merge_row_fragments([cap, *rows]), key=lambda ln: ln.bbox.cy)
+    assert [ln.text for ln in merged][:2] == [
+        "After the accomplishment of the call, the",
+        "proclamation of the Message, and the",
+    ]

@@ -90,18 +90,19 @@ def _render(page: pymupdf.Page, dpi: float) -> Image.Image:
 
 def _words(page: pymupdf.Page) -> list[Word]:
     W, H = page.rect.width, page.rect.height
-    fonts: list[tuple[pymupdf.Rect, str, float]] = []
+    fonts: list[tuple[pymupdf.Rect, str, float, bool]] = []
     for block in page.get_text("dict")["blocks"]:
         for line in block.get("lines", []):
+            vertical = abs(line["dir"][0]) < 0.5
             for span in line["spans"]:
-                fonts.append((pymupdf.Rect(span["bbox"]), span["font"], span["size"]))
+                fonts.append((pymupdf.Rect(span["bbox"]), span["font"], span["size"], vertical))
     invisible = _invisible_rects(page)
     words: list[Word] = []
     line_ids: dict[tuple[int, int], int] = {}
     for x0, y0, x1, y1, text, bno, lno, _ in page.get_text("words"):
         r = pymupdf.Rect(x0, y0, x1, y1)
         c = (r.tl + r.br) / 2
-        font, size = next(((f, s) for fr, f, s in fonts if c in fr), ("", 0.0))
+        font, size, vertical = next(((f, s, v) for fr, f, s, v in fonts if c in fr), ("", 0.0, False))
         lid = line_ids.setdefault((bno, lno), len(line_ids))
         words.append(
             Word(
@@ -110,6 +111,7 @@ def _words(page: pymupdf.Page) -> list[Word]:
                 font=font,
                 size=size,
                 line=lid,
+                vertical=vertical,
                 invisible=any(c in ir for ir in invisible),
             )
         )

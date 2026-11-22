@@ -55,6 +55,8 @@ class RunningElements:
                     b.role = Role.CONTENT
                 elif "aside" in b.flags and z:
                     b.role = Role.DECORATION
+                elif "vertical" in b.flags and z == SIDE:  # rotated margin text is never body flow
+                    b.role = Role.DECORATION
                 if b.role != Role.CONTENT and b.type in (BlockType.TITLE, BlockType.HEADING):
                     b.type = BlockType.PARAGRAPH
         assign_labels(pages)

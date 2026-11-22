@@ -119,6 +119,7 @@ class Word(BaseModel):
     size: float = 0.0
     line: int = 0  # line index within the page text layer
     invisible: bool = False
+    vertical: bool = False  # rotated text (e.g. a side label printed bottom-to-top)
 
 
 class Block(BaseModel):
