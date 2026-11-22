@@ -23,6 +23,7 @@ dependencies = [
     "pyobjc-framework-Vision>=11; sys_platform == 'darwin'",
     "rich>=15.0.0",
     "tomli-w>=1.2.0",
+    "tomlkit>=0.13",
     "typer>=0.27.3",
     "wordfreq>=3.1.1",
 ]

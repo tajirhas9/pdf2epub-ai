@@ -7,7 +7,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-import tomli_w
+import tomlkit
+from tomlkit.items import Item
 
 from pdf2epub.config import LLMSettings, Settings
 from pdf2epub.paths import locations
@@ -24,11 +25,28 @@ def read(path: Path | None = None) -> dict:
     return tomllib.loads(path.read_text()) if path.exists() else {}
 
 
+def _sync(table: Any, data: dict) -> None:
+    """Make a tomlkit table equal `data` in place, so untouched lines keep their comments and layout."""
+    for key in [k for k in table if k not in data]:
+        del table[key]
+    for key, value in data.items():
+        old = table.get(key)
+        if isinstance(value, dict) and isinstance(old, dict):
+            _sync(old, value)
+        elif key not in table or old != value:
+            new = tomlkit.item(value)
+            if isinstance(old, Item) and old.trivia.comment:  # keep a trailing "# ..." on a changed value
+                new.trivia.comment_ws, new.trivia.comment = old.trivia.comment_ws, old.trivia.comment
+            table[key] = new
+
+
 def write(data: dict, path: Path | None = None) -> Path:
     path = path or config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    doc = tomlkit.parse(path.read_text()) if path.exists() else tomlkit.document()
+    _sync(doc, data)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(tomli_w.dumps(data))
+    tmp.write_text(tomlkit.dumps(doc))
     os.chmod(tmp, 0o600)  # may hold an API key when no keyring is available
     tmp.replace(path)
     return path
