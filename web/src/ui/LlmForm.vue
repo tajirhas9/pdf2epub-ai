@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { api, type Check, type Provider } from './api'
+import ModelPicker from './ModelPicker.vue'
 import { errorText } from './store'
 
 const props = defineProps<{
@@ -133,14 +134,11 @@ watch([baseUrl, model, apiKey], () => (check.value = null))
     <div class="field">
       <label for="llm-model">Model</label>
       <div class="row">
-        <input id="llm-model" v-model.trim="model" type="text" list="llm-models" placeholder="Server default" spellcheck="false" />
+        <ModelPicker id="llm-model" v-model="model" :models="models" :loading="loadingModels" placeholder="Server default" />
         <button type="button" class="btn" :disabled="loadingModels || !baseUrl" @click="loadModels">
           <span v-if="loadingModels" class="spinner" />{{ loadingModels ? 'Loading' : 'Refresh list' }}
         </button>
       </div>
-      <datalist id="llm-models">
-        <option v-for="m in models" :key="m" :value="m" />
-      </datalist>
       <span v-if="pinned('llm.model')" class="hint warn">Set by {{ ENV['llm.model'] }} in the environment, which wins over this value.</span>
       <span v-else-if="modelsLoaded && models.length" class="hint">
         {{ models.length }} model{{ models.length === 1 ? '' : 's' }} available — pick one that can read images.
