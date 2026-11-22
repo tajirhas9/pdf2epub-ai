@@ -48,6 +48,7 @@ class Line:
     score: float
     bbox: BBox
     script: str
+    vertical: bool = False  # rotated text (side label): never part of a horizontal text row
 
 
 class Text:
@@ -85,7 +86,9 @@ class Text:
             if line.script == "latin":
                 line.text = split_glued_words(fix_punct_spacing(line.text), lang)
         page.edge_lines = [
-            Word(text=ln.text, bbox=ln.bbox) for ln in lines if ln.bbox.x0 < EDGE or ln.bbox.x1 > 1 - EDGE
+            Word(text=ln.text, bbox=ln.bbox)
+            for ln in lines
+            if not ln.vertical and (ln.bbox.x0 < EDGE or ln.bbox.x1 > 1 - EDGE)
         ]
         assign_lines(page, lines, ctx.settings.langs)
         page.flags = [f for f in page.flags if f != "ocr"] + ([] if use_layer else ["ocr"])
@@ -117,6 +120,8 @@ class Text:
                 implausible = _too_few_letters(cur_text, boxes[i])
                 if s > cur_score or (implausible and s > 0.3):
                     best[i] = (t, s, script)
+        heights = sorted(y1 - y0 for _, y0, _, y1 in boxes)
+        line_h = heights[len(heights) // 2] if heights else 0.0
         lines = []
         for (x0, y0, x1, y1), (text, score, script) in zip(boxes, best, strict=False):
             text = normalize(text).strip()
@@ -128,9 +133,16 @@ class Text:
                     score=score,
                     bbox=BBox(x0=x0 / W, y0=y0 / H, x1=x1 / W, y1=y1 / H),
                     script=dominant_script(text) or script,
+                    vertical=_is_vertical_box(x1 - x0, y1 - y0, line_h),
                 )
             )
         return lines
+
+
+def _is_vertical_box(w: float, h: float, line_h: float) -> bool:
+    """A detected box much taller than wide and than a text line is rotated text (e.g. a side
+    label). Drop caps and single tall characters are not: they are only ~1-3x as tall as wide."""
+    return h > 4 * w and h > 2 * line_h
 
 
 def _too_few_letters(text: str, box) -> bool:
@@ -178,12 +190,14 @@ def lines_from_words(words: list[Word]) -> list[Line]:
         by_line.setdefault(w.line, []).append(w)
     lines = []
     for ws in by_line.values():
-        ws.sort(key=lambda w: w.bbox.x0)
+        vertical = all(w.vertical for w in ws)
+        if not vertical:  # rotated words keep the text layer's own (reading) order
+            ws.sort(key=lambda w: w.bbox.x0)
         text = normalize(" ".join(w.text for w in ws))
         bbox = ws[0].bbox
         for w in ws[1:]:
             bbox = bbox.union(w.bbox)
-        lines.append(Line(text=text, score=1.0, bbox=bbox, script=dominant_script(text) or "latin"))
+        lines.append(Line(text=text, score=1.0, bbox=bbox, script=dominant_script(text) or "latin", vertical=vertical))
     return lines
 
 
@@ -274,6 +288,8 @@ def assign_lines(page: Page, lines: list[Line], lang_hints: list[str]) -> None:
     for line in lines:
         best, best_ov = None, 0.0
         for b in text_blocks:
+            if line.vertical and b.bbox.width >= b.bbox.height:
+                continue  # rotated text never belongs inside a horizontal text block
             ov = line.bbox.overlap_ratio(b.bbox)
             if ov > best_ov:
                 best, best_ov = b, ov
@@ -298,7 +314,9 @@ def assign_lines(page: Page, lines: list[Line], lang_hints: list[str]) -> None:
     if orphans:
         page.flags.append(f"orphan-lines:{len(orphans)}")
         # Text the layout model missed: keep it rather than lose content.
-        for group in _group_orphans(orphans):
+        for group in _group_orphans([ln for ln in orphans if not ln.vertical]) + [
+            [ln] for ln in orphans if ln.vertical
+        ]:
             box = group[0].bbox
             for ln in group[1:]:
                 box = box.union(ln.bbox)
@@ -306,6 +324,8 @@ def assign_lines(page: Page, lines: list[Line], lang_hints: list[str]) -> None:
                 id=page.new_block_id(), type=BlockType.PARAGRAPH, bbox=box, source=Source.OCR, order=len(page.blocks)
             )
             b.flags.append("layout-missed")
+            if group[0].vertical:
+                b.flags.append("vertical")
             set_block_text(b, group, lang_hints)
             page.blocks.append(b)
 
@@ -354,6 +374,8 @@ def _row_neighbour(
     line: Line, blocks: list[Block], owned: dict[str, list[Line]], all_lines: list[Line]
 ) -> Block | None:
     """Text block owning a line on the same visual row, within a couple of line-heights."""
+    if line.vertical:
+        return None
     best, best_gap = None, 2.5 * line.bbox.height
     for b in blocks:
         for other in all_lines:
@@ -371,25 +393,21 @@ def _row_neighbour(
 def merge_row_fragments(lines: list[Line], max_gap: float = 2.5) -> list[Line]:
     """Detectors may split one printed line at a wide gap (e.g. a footnote number and its text).
     Fragments on the same visual row and close together (gap < max_gap line-heights; columns stay
-    apart) are joined back into one line, in reading direction."""
+    apart) are joined back into one line, in reading direction. Rotated lines are never joined,
+    and a tall box (drop cap) only joins the row its top is aligned with: otherwise one tall box
+    would chain several printed lines into one."""
     if len(lines) < 2:
         return lines
+    out = [ln for ln in lines if ln.vertical]
     rows: list[list[Line]] = []
-    for ln in sorted(lines, key=lambda ln: (ln.bbox.cy, ln.bbox.x0)):
-        placed = False
+    for ln in sorted((ln for ln in lines if not ln.vertical), key=lambda ln: (ln.bbox.cy, ln.bbox.x0)):
         for row in rows[-4:]:  # rows near this height
-            ref = row[0].bbox
-            overlap = min(ref.y1, ln.bbox.y1) - max(ref.y0, ln.bbox.y0)
-            if overlap < 0.6 * min(ref.height, ln.bbox.height):
-                continue
-            h = max(ref.height, ln.bbox.height)
-            if any(max(o.bbox.x0 - ln.bbox.x1, ln.bbox.x0 - o.bbox.x1, 0.0) < max_gap * h for o in row):
+            if all(_same_row(o, ln) for o in row) and any(_gap(o, ln) < max_gap * _small_h(o, ln) for o in row):
                 row.append(ln)
-                placed = True
                 break
-        if not placed:
+        else:
             rows.append([ln])
-    out = []
+    rows = _attach_drop_caps(rows, max_gap)
     for row in rows:
         if len(row) == 1:
             out.append(row[0])
@@ -399,11 +417,58 @@ def merge_row_fragments(lines: list[Line], max_gap: float = 2.5) -> list[Line]:
         box = row[0].bbox
         for ln in row[1:]:
             box = box.union(ln.bbox)
+        lo = min(ln.bbox.height for ln in row)
+        body = [ln for ln in row if ln.bbox.height <= 1.8 * lo]  # without a drop cap hanging below
+        box = BBox(x0=box.x0, x1=box.x1, y0=min(ln.bbox.y0 for ln in body), y1=max(ln.bbox.y1 for ln in body))
         script = max(set(ln.script for ln in row), key=lambda sc: sum(len(ln.text) for ln in row if ln.script == sc))
-        out.append(
-            Line(text=" ".join(ln.text for ln in row), score=min(ln.score for ln in row), bbox=box, script=script)
-        )
+        text = row[0].text
+        for prev, ln in zip(row, row[1:], strict=False):
+            drop_cap = prev.bbox.height > 1.8 * lo and len(prev.text) == 1 and prev.text.isalpha()
+            text += ("" if drop_cap and ln.text[:1].islower() else " ") + ln.text
+        out.append(Line(text=text, score=min(ln.score for ln in row), bbox=box, script=script))
     return out
+
+
+def _attach_drop_caps(rows: list[list[Line]], max_gap: float) -> list[list[Line]]:
+    """A lone box much taller than the text lines (an initial/drop cap, often rising above the first
+    line) belongs at the start of the topmost row it spans on its right."""
+    heights = sorted(ln.bbox.height for row in rows for ln in row)
+    if len(heights) < 3:
+        return rows
+    typical = heights[len(heights) // 2]
+    tall = [row for row in rows if len(row) == 1 and row[0].bbox.height > 1.8 * typical]
+    for row in tall:
+        cap = row[0].bbox
+        spanned = [
+            r
+            for r in rows
+            if r is not row
+            and r not in tall
+            and all(cap.y0 <= ln.bbox.cy <= cap.y1 for ln in r)
+            and cap.x0 < min(ln.bbox.x0 for ln in r) < cap.x1 + max_gap * typical  # to its right (swash may overlap)
+        ]
+        if spanned:
+            min(spanned, key=lambda r: min(ln.bbox.y0 for ln in r)).insert(0, row[0])
+            rows = [r for r in rows if r is not row]
+    return rows
+
+
+def _small_h(a: Line, b: Line) -> float:
+    return min(a.bbox.height, b.bbox.height)
+
+
+def _gap(a: Line, b: Line) -> float:
+    return max(a.bbox.x0 - b.bbox.x1, b.bbox.x0 - a.bbox.x1, 0.0)
+
+
+def _same_row(a: Line, b: Line) -> bool:
+    lo = _small_h(a, b)
+    overlap = min(a.bbox.y1, b.bbox.y1) - max(a.bbox.y0, b.bbox.y0)
+    if overlap < 0.6 * lo:
+        return False
+    if max(a.bbox.height, b.bbox.height) > 1.8 * lo:  # tall box spanning rows: only its top row
+        return abs(a.bbox.y0 - b.bbox.y0) < 0.5 * lo
+    return True
 
 
 def _reading_sorted(lines: list[Line]) -> list[Line]:
