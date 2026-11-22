@@ -255,7 +255,7 @@ local servers reject that host name with HTTP 403 until it is added to their all
 ## Tutorial: web app
 
 ```bash
-pdf2epub ui                 # --port 8765 · --no-open · --host 0.0.0.0 (Docker / other machines)
+pdf2epub ui                 # --port 8765 · --no-open · --host 0.0.0.0 (Docker / WSL / other machines)
 ```
 
 It prints a link like `http://localhost:8765/?t=…` and opens it. The `t=` part is a private access
@@ -327,8 +327,10 @@ Good to know:
 
 ### WSL, other machines, Docker
 
-- **WSL**: the app opens in your Windows browser. If Windows can't reach `localhost` in your WSL
-  setup, it shows and opens the WSL address (e.g. `http://172.x.x.x:8765/`) instead.
+- **WSL**: the app opens in your Windows browser. It listens on this computer only by default; if
+  Windows can't reach `localhost` in your WSL setup, start with `--host 0.0.0.0` (works for
+  `pdf2epub dev` too) and it shows and opens the WSL address (e.g. `http://172.x.x.x:8765/`) instead.
+  That also makes it reachable from other machines that can reach WSL.
 - **Another machine / Docker**: start with `--host 0.0.0.0` and open the printed link with the
   machine's address instead of `localhost`.
 
@@ -621,7 +623,7 @@ PDF again in the web app continues its progress.
 | `npm ci failed` on first use | the first build installs the EPUB build tools (needs internet once) |
 | first conversion is slow | the OCR models download once (~250 MB) |
 | web app link says "from an earlier run" | the access key changes on every start: use the newest link from the terminal |
-| WSL: page doesn't open in Windows | use the WSL address the terminal prints (`http://172.x.x.x:…`) |
+| WSL: page doesn't open in Windows | restart with `--host 0.0.0.0` and use the WSL address it prints (`http://172.x.x.x:…`) |
 
 `-v` (e.g. `pdf2epub -v run book.pdf`) prints full logs and tracebacks.
 

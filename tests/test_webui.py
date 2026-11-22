@@ -186,6 +186,24 @@ def test_api_needs_the_access_key(server):
     assert _req(f"{base}/../../etc/passwd")[1].startswith(b"<!doctype html>")
 
 
+def test_token_redirect_stays_on_this_server(server):
+    base, app = server
+    opener = urllib.request.build_opener(_NoRedirect)
+    for path in ("//evil.example/x", "/\\evil.example/x"):
+        try:
+            opener.open(f"{base}{path}?t={app.token}", timeout=10)
+            raise AssertionError("expected a redirect")
+        except urllib.error.HTTPError as e:
+            assert e.code == 302
+            assert e.headers["Location"] == "/evil.example/x"
+
+
+def test_header_values_drop_line_breaks():
+    from pdf2epub.webui.server import header_value
+
+    assert header_value("a\r\nSet-Cookie: x=1") == "aSet-Cookie: x=1"
+
+
 def test_upload_validates_pdf_and_lists_jobs(server, tmp_path):
     base, app = server
     cookie = f"pdf2epub_ui={app.token}"
