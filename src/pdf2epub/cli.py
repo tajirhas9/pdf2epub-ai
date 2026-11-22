@@ -350,7 +350,9 @@ def _stop_group(proc: subprocess.Popen) -> None:
         os.killpg(proc.pid, signal.SIGKILL)
 
 
-def _announce(url: str, port: int, open_browser: bool, title: str, note: str, query: str = "") -> None:
+def _announce(
+    url: str, port: int, open_browser: bool, title: str, note: str, query: str = "", host: str = "127.0.0.1"
+) -> None:
     """Print the address (on WSL: the one Windows can reach) and open the browser."""
     from rich.panel import Panel
 
@@ -358,7 +360,8 @@ def _announce(url: str, port: int, open_browser: bool, title: str, note: str, qu
 
     lines = []
     if is_wsl():
-        ip = wsl_ip()
+        # the WSL address only answers when the server listens beyond loopback (--host 0.0.0.0)
+        ip = wsl_ip() if host not in ("127.0.0.1", "localhost") else None
         candidates = [url] + ([f"http://{ip}:{port}/"] if ip else [])
         with console.status("checking which address Windows can reach…"):
             reachable = windows_reachable(candidates)
@@ -368,6 +371,8 @@ def _announce(url: str, port: int, open_browser: bool, title: str, note: str, qu
         lines.append(f"[bold]{url}{query}[/]")
         if reachable is None and alt:
             lines.append(f"[dim]if that doesn't load in Windows, try {alt[0]}{query}[/]")
+        elif reachable is None and not ip:
+            lines.append("[dim]WSL: if Windows can't load this, restart with --host 0.0.0.0[/]")
         elif reachable and reachable != candidates[0]:
             lines.append("[dim]WSL: localhost isn't forwarded to Windows here, so this is the WSL address[/]")
     else:
@@ -387,17 +392,19 @@ def dev(
     book: Annotated[str | None, typer.Option(help="Book id or source path (default: latest)")] = None,
     port: Annotated[int, typer.Option(help="Preferred port (the next free one is used if busy)")] = 5173,
     open_browser: Annotated[bool, typer.Option("--open/--no-open", help="Open the workbench in your browser")] = True,
+    host: Annotated[
+        str, typer.Option(help="Listen address (default: this computer only; 0.0.0.0 in WSL if Windows needs it)")
+    ] = "127.0.0.1",
 ) -> None:
     from pdf2epub import app as core
-    from pdf2epub.browser import bind_host, free_port, wait_until_up
+    from pdf2epub.browser import free_port, wait_until_up
 
     settings = _settings()
     book_dir = core.resolve_book(settings, book)
     _header(f"workbench · {book_dir.name}", [])
     with console.status("preparing the workbench…"):
         web = core.ensure_node_modules(settings)
-    host = bind_host()
-    port = free_port(port, "0.0.0.0" if host == "0.0.0.0" else "127.0.0.1")
+    port = free_port(port, host)
     url = f"http://localhost:{port}/"
     proc = subprocess.Popen(
         [
@@ -426,7 +433,7 @@ def dev(
             up = wait_until_up(url, alive=lambda: proc.poll() is None)
         if not up:
             raise RuntimeError("the workbench server did not start (run with -v for details)")
-        _announce(url, port, open_browser, "Workbench ready", "pages update live while convert/review run")
+        _announce(url, port, open_browser, "Workbench ready", "pages update live while convert/review run", host=host)
         proc.wait()
     except KeyboardInterrupt:
         console.print("[dim]workbench stopped[/]")
@@ -438,14 +445,14 @@ def ui(
     port: Annotated[int, typer.Option(help="Preferred port (the next free one is used if busy)")] = 8765,
     open_browser: Annotated[bool, typer.Option("--open/--no-open", help="Open it in your browser")] = True,
     host: Annotated[
-        str | None, typer.Option(help="Listen address (default: this computer only; 0.0.0.0 in Docker)")
-    ] = None,
+        str, typer.Option(help="Listen address (default: this computer only; 0.0.0.0 in Docker or WSL)")
+    ] = "127.0.0.1",
 ) -> None:
     """Web app: first-run setup, settings, upload a PDF and convert it (same engine as the CLI)."""
     import threading
 
     from pdf2epub import paddle_install as pi
-    from pdf2epub.browser import bind_host, free_port
+    from pdf2epub.browser import free_port
     from pdf2epub.webui.server import ensure_ui, make_server
 
     settings = _settings()
@@ -459,7 +466,6 @@ def ui(
             " (progress in the web app)",
             highlight=False,
         )
-    host = host or bind_host()
     port = free_port(port, host)
     server, web = make_server(host, port, dist, settings)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -472,6 +478,7 @@ def ui(
             "pdf2epub is running",
             "the link carries a private access key",
             f"?t={web.token}",
+            host=host,
         )
         thread.join()
     except KeyboardInterrupt:

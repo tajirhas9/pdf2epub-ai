@@ -1,7 +1,7 @@
 """Local HTTP server for `pdf2epub ui`: JSON API + the built Vue app (no extra Python dependencies).
 
 Access needs a per-run token (in the opened URL, then a SameSite=Strict cookie), because the server
-can change settings and, on WSL, listens on all interfaces so Windows can reach it.
+can change settings and may listen beyond this computer (`--host 0.0.0.0`: Docker, WSL).
 """
 
 from __future__ import annotations
@@ -76,6 +76,11 @@ def ensure_ui(settings: Settings) -> Path:
 # ---- HTTP ---------------------------------------------------------------------------------------
 
 
+def header_value(value: object) -> str:
+    """A header value with CR/LF removed, so no value can end its header line early."""
+    return str(value).replace("\r", "").replace("\n", "")
+
+
 class ApiError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__(message)
@@ -105,7 +110,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         for k, v in (headers or {}).items():
-            self.send_header(k, v)
+            self.send_header(k, header_value(v))
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -171,7 +176,9 @@ class Handler(BaseHTTPRequestHandler):
             if not secrets.compare_digest(token, self.app.token):
                 raise ApiError(403, "This link is from an earlier run. Use the link printed by `pdf2epub ui`.")
             cookie = f"{COOKIE}={self.app.token}; Path=/; HttpOnly; SameSite=Strict"
-            self._send(302, b"", "text/plain", {"Location": path or "/", "Set-Cookie": cookie})
+            # one leading slash: "//host" or "/\\host" would send the browser to another site
+            here = "/" + path.lstrip("/\\")
+            self._send(302, b"", "text/plain", {"Location": here, "Set-Cookie": cookie})
             return
         rel = path.lstrip("/") or "ui.html"
         file = (self.app.dist / rel).resolve()
@@ -248,7 +255,7 @@ class Handler(BaseHTTPRequestHandler):
         path = Path(job.result["path"]) if job and job.result else None
         if path is None or not path.exists():
             raise ApiError(404, "the EPUB is no longer there (moved or deleted)")
-        ascii_name = re.sub(r"[^\w.\- ]", "_", path.name)
+        ascii_name = re.sub(r"[^\w.\- ]", "_", path.name, flags=re.ASCII)
         disp = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(path.name)}"
         self._send(200, path.read_bytes(), "application/epub+zip", {"Content-Disposition": disp})
 

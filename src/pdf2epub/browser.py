@@ -23,12 +23,6 @@ def is_wsl() -> bool:
         return False
 
 
-def bind_host() -> str:
-    # WSL: Windows reaches the server through localhost forwarding / the VM address; listening on all
-    # interfaces avoids the IPv6-only "localhost" bind Node may pick, which Windows can't reach.
-    return "0.0.0.0" if is_wsl() else "127.0.0.1"
-
-
 def free_port(preferred: int, host: str = "127.0.0.1", tries: int = 50) -> int:
     for port in range(preferred, preferred + tries):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
